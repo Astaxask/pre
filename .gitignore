@@ -36,3 +36,12 @@ yarn-error.log*
 # Misc
 .DS_Store
 *.pem
+
+# Python (sidecar)
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Rust (Tauri)
+**/target/
