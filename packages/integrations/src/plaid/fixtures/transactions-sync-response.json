@@ -1,0 +1,73 @@
+{
+  "added": [
+    {
+      "transaction_id": "txn_001",
+      "account_id": "acc_checking_001",
+      "amount": 12.5,
+      "iso_currency_code": "USD",
+      "date": "2026-03-28",
+      "name": "STARBUCKS STORE 12345",
+      "merchant_name": "Starbucks",
+      "personal_finance_category": {
+        "primary": "FOOD_AND_DRINK",
+        "detailed": "FOOD_AND_DRINK_COFFEE"
+      }
+    },
+    {
+      "transaction_id": "txn_002",
+      "account_id": "acc_checking_001",
+      "amount": 85.0,
+      "iso_currency_code": "USD",
+      "date": "2026-03-27",
+      "name": "WHOLE FOODS MARKET",
+      "merchant_name": "Whole Foods",
+      "personal_finance_category": {
+        "primary": "FOOD_AND_DRINK",
+        "detailed": "FOOD_AND_DRINK_GROCERIES"
+      }
+    },
+    {
+      "transaction_id": "txn_003",
+      "account_id": "acc_credit_001",
+      "amount": 49.99,
+      "iso_currency_code": "USD",
+      "date": "2026-03-27",
+      "name": "NETFLIX.COM",
+      "merchant_name": "Netflix",
+      "personal_finance_category": {
+        "primary": "ENTERTAINMENT",
+        "detailed": "ENTERTAINMENT_TV_AND_MOVIES"
+      }
+    },
+    {
+      "transaction_id": "txn_004",
+      "account_id": "acc_checking_001",
+      "amount": -2500.0,
+      "iso_currency_code": "USD",
+      "date": "2026-03-25",
+      "name": "EMPLOYER DIRECT DEP",
+      "merchant_name": null,
+      "personal_finance_category": {
+        "primary": "INCOME",
+        "detailed": "INCOME_WAGES"
+      }
+    },
+    {
+      "transaction_id": "txn_005",
+      "account_id": "acc_checking_001",
+      "amount": 1200.0,
+      "iso_currency_code": "USD",
+      "date": "2026-03-25",
+      "name": "RENT PAYMENT",
+      "merchant_name": null,
+      "personal_finance_category": {
+        "primary": "RENT_AND_UTILITIES",
+        "detailed": "RENT_AND_UTILITIES_RENT"
+      }
+    }
+  ],
+  "modified": [],
+  "removed": [],
+  "next_cursor": "cursor_abc123_page2",
+  "has_more": false
+}

@@ -1,0 +1,45 @@
+{
+  "accounts": [
+    {
+      "account_id": "acc_checking_001",
+      "balances": {
+        "available": 3450.0,
+        "current": 3500.0,
+        "limit": null,
+        "iso_currency_code": "USD"
+      },
+      "name": "Plaid Checking",
+      "type": "depository",
+      "subtype": "checking"
+    },
+    {
+      "account_id": "acc_savings_001",
+      "balances": {
+        "available": 12000.0,
+        "current": 12000.0,
+        "limit": null,
+        "iso_currency_code": "USD"
+      },
+      "name": "Plaid Savings",
+      "type": "depository",
+      "subtype": "savings"
+    },
+    {
+      "account_id": "acc_credit_001",
+      "balances": {
+        "available": 4500.0,
+        "current": 500.0,
+        "limit": 5000.0,
+        "iso_currency_code": "USD"
+      },
+      "name": "Plaid Credit Card",
+      "type": "credit",
+      "subtype": "credit card"
+    }
+  ],
+  "item": {
+    "item_id": "item_sandbox_001",
+    "institution_id": "ins_1"
+  },
+  "request_id": "req_sandbox_001"
+}
