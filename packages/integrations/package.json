@@ -15,7 +15,8 @@
     "build": "tsc",
     "check-types": "tsc --noEmit",
     "test": "vitest run",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "setup:google": "tsx src/google-calendar/oauth-setup.ts"
   },
   "dependencies": {
     "@pre/shared": "workspace:*",
