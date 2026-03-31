@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useGateway } from '@repo/ui';
 
 // ---------------------------------------------------------------------------
 // Tauri interop
@@ -32,12 +31,23 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 // Types
 // ---------------------------------------------------------------------------
 
-type ThinkingEntry = {
-  text: string;
+type RawObservation = {
+  id: string;
+  source: string;
   domain: string;
   event_type: string;
   timestamp: number;
-  source: string;
+  payload: Record<string, unknown>;
+};
+
+type AIThought = {
+  id: string;
+  text: string;
+  category: 'reflection' | 'insight' | 'pattern' | 'question' | 'prediction' | 'nudge';
+  importance: 'ambient' | 'notable' | 'important';
+  timestamp: number;
+  isNew?: boolean;
+  isStreaming?: boolean;
 };
 
 type ObserverInfo = {
@@ -48,171 +58,299 @@ type ObserverInfo = {
   events_collected: number;
 };
 
-type InsightData = {
-  id: string;
-  insightType: string;
-  category: string;
-  urgency: string;
-  confidence: number;
-  domains: string[];
-  estimatedImpact?: string;
-  payload: {
-    description: string;
-    whyItMatters: string;
-    suggestedAction?: string;
-  };
-  generatedAt: number;
-};
-
 // ---------------------------------------------------------------------------
-// Constants
+// AI Engine — calls Ollama via Tauri command (bypasses CORS)
 // ---------------------------------------------------------------------------
 
-const DOMAIN_COLORS: Record<string, string> = {
-  body: '#34C77B', money: '#F0C040', people: '#A855F7',
-  time: '#4F79FF', mind: '#FF5A4A', world: '#9A9A96',
-};
+async function generateThoughts(): Promise<AIThought[]> {
+  try {
+    const raw = await tauriInvoke<Array<{
+      id: string;
+      text: string;
+      category?: string;
+      importance?: string;
+      timestamp?: number;
+    }>>('generate_ai_thoughts', { limit: 50 });
 
-const DOMAIN_EMOJI: Record<string, string> = {
-  body: '💪', money: '💰', people: '👥',
-  time: '⏱', mind: '🧠', world: '🌍',
-};
+    if (!raw || raw.length === 0) return [];
 
-const INSIGHT_EMOJI: Record<string, string> = {
-  'money-hack': '💰', 'time-hack': '⚡', 'health-correlation': '🔗',
-  'relationship-nudge': '💬', 'idea-synthesis': '💡', 'self-knowledge': '🪞',
-  'prediction': '🔮', 'behavior-loop': '🔄', 'energy-map': '⚡',
-  'burnout-signal': '🚨', 'opportunity': '🎯', 'conflict-detected': '⚠️',
-  'decision-support': '📊', 'goal-drift': '📉',
-  'pattern-detected': '📈', 'trend-change': '📊', 'anomaly': '🔍', 'correlation': '🔗',
-};
+    return raw.map((t) => ({
+      id: t.id || crypto.randomUUID(),
+      text: t.text || '',
+      category: (t.category as AIThought['category']) || 'reflection',
+      importance: (t.importance as AIThought['importance']) || 'ambient',
+      timestamp: t.timestamp || Date.now(),
+      isNew: true,
+    }));
+  } catch (err) {
+    console.error('AI thought generation failed:', err);
+    return [];
+  }
+}
+
+async function checkAIAvailable(): Promise<boolean> {
+  try {
+    const result = await tauriInvoke<{ available: boolean; models: string[] }>('check_ai_status');
+    return result?.available ?? false;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Seed thoughts (shown while AI warms up)
 // ---------------------------------------------------------------------------
 
-function timeAgo(ts: number): string {
+function getSeedThoughts(): AIThought[] {
+  return [
+    {
+      id: 'seed-1',
+      text: 'Waking up... I can see your screen activity starting to flow in. Give me a moment to understand what you\'re working on.',
+      category: 'reflection',
+      importance: 'ambient',
+      timestamp: Date.now() - 30000,
+    },
+    {
+      id: 'seed-2',
+      text: 'I\'m your second brain — I\'ll be thinking about your life even when you\'re not looking. Check back anytime.',
+      category: 'reflection',
+      importance: 'notable',
+      timestamp: Date.now() - 15000,
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Time helpers
+// ---------------------------------------------------------------------------
+
+function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
   const sec = Math.floor(diff / 1000);
-  if (sec < 10) return 'now';
-  if (sec < 60) return `${sec}s ago`;
+  if (sec < 30) return 'just now';
+  if (sec < 60) return 'moments ago';
   const min = Math.floor(sec / 60);
+  if (min === 1) return 'a minute ago';
   if (min < 60) return `${min}m ago`;
   const hr = Math.floor(min / 60);
+  if (hr === 1) return 'an hour ago';
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
 }
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
 // ---------------------------------------------------------------------------
-// App
+// App — The Living Second Brain
 // ---------------------------------------------------------------------------
 
 export function App() {
-  const { connected, insights, lastMessage, sendMessage } = useGateway();
-  const [stream, setStream] = useState<ThinkingEntry[]>([]);
+  const [thoughts, setThoughts] = useState<AIThought[]>([]);
+  const [pinnedThoughts, setPinnedThoughts] = useState<AIThought[]>([]);
+  const [isThinking, setIsThinking] = useState(false);
   const [observers, setObservers] = useState<ObserverInfo[]>([]);
-  const [importantInsights, setImportantInsights] = useState<InsightData[]>([]);
-  const [showObservers, setShowObservers] = useState(false);
+  const [observationCount, setObservationCount] = useState(0);
+  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
+  const [showStatus, setShowStatus] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
+  const thoughtIdSet = useRef(new Set<string>());
+  const lastGenerationRef = useRef(0);
+  const initialLoadDone = useRef(false);
 
-  // ── Load thinking stream from local buffer (works without gateway) ──
-  const refreshStream = useCallback(async () => {
-    const thoughts = await tauriInvoke<ThinkingEntry[]>('get_thinking_stream', { limit: 200 });
-    if (thoughts && thoughts.length > 0) {
-      setStream(thoughts);
-    }
+  // ── Check if Ollama is available ──────────────────────────────
+  useEffect(() => {
+    checkAIAvailable().then(setAiAvailable);
   }, []);
 
+  // ── Load observers status ─────────────────────────────────────
   const refreshObservers = useCallback(async () => {
     const obs = await tauriInvoke<ObserverInfo[]>('get_observer_status');
     if (obs) setObservers(obs);
   }, []);
 
-  // Initial load + periodic refresh
+  // ── Generate AI thoughts from observations ────────────────────
+  const think = useCallback(async () => {
+    // Don't overlap thinking sessions
+    if (isThinking) return;
+    // Minimum 30 seconds between generations
+    if (Date.now() - lastGenerationRef.current < 30000) return;
+
+    setIsThinking(true);
+    lastGenerationRef.current = Date.now();
+
+    try {
+      // Get observation count for status display
+      const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 50 });
+      setObservationCount(rawObs?.length ?? 0);
+
+      if (!rawObs || rawObs.length === 0) {
+        setIsThinking(false);
+        return;
+      }
+
+      // Feed observations to AI via Tauri → Ollama
+      const newThoughts = await generateThoughts();
+
+      if (newThoughts.length > 0) {
+        setThoughts((prev) => {
+          // Deduplicate by checking text similarity
+          const existing = new Set(prev.map((t) => t.text.slice(0, 50)));
+          const fresh = newThoughts.filter((t) => !existing.has(t.text.slice(0, 50)));
+
+          // Mark new thoughts
+          fresh.forEach((t) => {
+            t.isNew = true;
+            thoughtIdSet.current.add(t.id);
+          });
+
+          // Separate important thoughts for pinning
+          const important = fresh.filter((t) => t.importance === 'important');
+          if (important.length > 0) {
+            setPinnedThoughts((pp) => [...important, ...pp].slice(0, 3));
+          }
+
+          // Keep last 50 thoughts
+          return [...fresh, ...prev].slice(0, 50);
+        });
+      }
+    } catch (err) {
+      console.error('Thinking failed:', err);
+    } finally {
+      setIsThinking(false);
+    }
+  }, [isThinking]);
+
+  // ── Initial setup ─────────────────────────────────────────────
   useEffect(() => {
-    refreshStream();
+    if (initialLoadDone.current) return;
+    initialLoadDone.current = true;
+
+    // Show seed thoughts immediately
+    setThoughts(getSeedThoughts());
     refreshObservers();
+
+    // Start first AI thinking cycle after 3 seconds (let observations collect)
+    const firstThink = setTimeout(() => {
+      think();
+    }, 3000);
+
+    return () => clearTimeout(firstThink);
+  }, [think, refreshObservers]);
+
+  // ── Periodic thinking loop ────────────────────────────────────
+  useEffect(() => {
     const interval = setInterval(() => {
-      refreshStream();
+      think();
       refreshObservers();
-    }, 5_000); // Refresh every 5 seconds
+    }, 60_000); // Think every 60 seconds
+
     return () => clearInterval(interval);
-  }, [refreshStream, refreshObservers]);
+  }, [think, refreshObservers]);
 
-  // ── Process gateway insights when connected ─────────────────────
+  // ── Clear "new" flag after animation ──────────────────────────
   useEffect(() => {
-    if (lastMessage?.type === 'insights-updated' || lastMessage?.type === 'insight-update') {
-      const payload = lastMessage.payload as InsightData[] | { insights?: InsightData[] };
-      const list = Array.isArray(payload) ? payload : (payload?.insights ?? []);
-      setImportantInsights(
-        list
-          .filter((i) => i.urgency === 'interrupt' || i.urgency === 'ambient')
-          .sort((a, b) => b.generatedAt - a.generatedAt)
-          .slice(0, 5)
+    const timeout = setTimeout(() => {
+      setThoughts((prev) =>
+        prev.map((t) => (t.isNew ? { ...t, isNew: false } : t))
       );
-    }
-  }, [lastMessage]);
+    }, 2000);
+    return () => clearTimeout(timeout);
+  }, [thoughts]);
 
-  // Use gateway insights too
-  useEffect(() => {
-    if (insights && insights.length > 0) {
-      const mapped = (insights as unknown as InsightData[])
-        .filter((i) => i.urgency === 'interrupt' || i.urgency === 'ambient')
-        .sort((a, b) => b.generatedAt - a.generatedAt)
-        .slice(0, 5);
-      if (mapped.length > 0) setImportantInsights(mapped);
-    }
-  }, [insights]);
-
-  // ── Derived ─────────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────────
   const activeObs = observers.filter((o) => o.enabled);
   const totalEvents = observers.reduce((s, o) => s + o.events_collected, 0);
 
   return (
-    <div className="flex h-screen w-full flex-col bg-surface">
-      {/* ── Header ─────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
-        <div className="flex items-center gap-2">
-          <div className={`h-2 w-2 rounded-full ${
-            stream.length > 0 ? 'bg-positive animate-pulse' : 'bg-text-tertiary'
-          }`} />
-          <span className="text-label text-text-primary font-medium">PRE</span>
-          <span className="text-micro text-text-tertiary">
-            {totalEvents > 0 ? `${totalEvents} observations` : 'starting up...'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {connected && (
-            <span className="text-micro text-positive">● gateway</span>
-          )}
-          <button
-            type="button"
-            onClick={() => setShowObservers(!showObservers)}
-            className="text-micro text-text-tertiary hover:text-text-secondary transition-colors"
+    <div className="flex h-screen w-full flex-col" style={{ background: '#0a0a0a' }}>
+      {/* ── Minimal header ─────────────────────────────────────── */}
+      <header className="flex items-center justify-between px-5 py-3 shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="relative">
+            <div
+              className={`h-2 w-2 rounded-full ${
+                isThinking ? 'bg-accent glow-breathe' : thoughts.length > 2 ? 'bg-positive' : 'bg-text-tertiary'
+              }`}
+              style={isThinking ? { background: '#7b9aff' } : thoughts.length > 2 ? { background: '#4ade80' } : {}}
+            />
+            {isThinking && (
+              <div
+                className="absolute inset-0 h-2 w-2 rounded-full"
+                style={{
+                  background: '#7b9aff',
+                  animation: 'pulse-subtle 1.5s ease-in-out infinite',
+                }}
+              />
+            )}
+          </div>
+          <span
+            className="text-xs font-medium tracking-wide"
+            style={{ color: '#e8e8e4', letterSpacing: '0.1em' }}
           >
-            {activeObs.length} observers
-          </button>
+            PRE
+          </span>
+          {isThinking && (
+            <span
+              className="text-xs fade-in"
+              style={{ color: '#4a4a46' }}
+            >
+              thinking...
+            </span>
+          )}
         </div>
-      </div>
 
-      {/* ── Observer panel (collapsible) ───────────────────────── */}
-      {showObservers && (
-        <div className="border-b border-border bg-surface-raised px-4 py-2">
-          <div className="flex flex-col gap-1">
+        <button
+          type="button"
+          onClick={() => setShowStatus(!showStatus)}
+          className="text-xs transition-colors"
+          style={{ color: '#4a4a46', cursor: 'pointer', background: 'none', border: 'none' }}
+        >
+          {totalEvents > 0 ? `${totalEvents} signals` : 'starting'}
+        </button>
+      </header>
+
+      {/* ── Status panel (collapsible) ──────────────────────────── */}
+      {showStatus && (
+        <div
+          className="px-5 py-3 fade-in"
+          style={{
+            borderTop: '1px solid rgba(255,255,255,0.04)',
+            borderBottom: '1px solid rgba(255,255,255,0.04)',
+            background: '#0e0e0e',
+          }}
+        >
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs" style={{ color: '#4a4a46' }}>
+                AI Engine
+              </span>
+              <span className="text-xs" style={{ color: aiAvailable ? '#4ade80' : '#f87171' }}>
+                {aiAvailable === null ? 'checking...' : aiAvailable ? `${MODEL}` : 'offline'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs" style={{ color: '#4a4a46' }}>
+                Observations
+              </span>
+              <span className="text-xs" style={{ color: '#8a8a86' }}>
+                {observationCount} in buffer
+              </span>
+            </div>
             {observers.map((obs) => (
               <div key={obs.name} className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className={`h-1.5 w-1.5 rounded-full ${
-                    obs.enabled ? 'bg-positive' : 'bg-text-tertiary'
-                  }`} />
-                  <span className="text-micro text-text-primary">{obs.name}</span>
+                  <div
+                    className="h-1 w-1 rounded-full"
+                    style={{ background: obs.enabled ? '#4ade80' : '#2a2a26' }}
+                  />
+                  <span className="text-xs" style={{ color: '#4a4a46' }}>
+                    {obs.name}
+                  </span>
                 </div>
-                <span className="text-micro text-text-tertiary">
-                  {obs.events_collected > 0 ? `${obs.events_collected}` : obs.enabled ? '...' : 'off'}
+                <span className="text-xs" style={{ color: '#3a3a36' }}>
+                  {obs.events_collected > 0
+                    ? obs.events_collected
+                    : obs.enabled
+                      ? '...'
+                      : 'off'}
                 </span>
               </div>
             ))}
@@ -220,139 +358,167 @@ export function App() {
         </div>
       )}
 
-      {/* ── Important insights (pinned at top) ─────────────────── */}
-      {importantInsights.length > 0 && (
-        <div className="border-b border-border">
-          {importantInsights.map((insight) => (
-            <InsightBanner key={insight.id} insight={insight} />
+      {/* ── Pinned important thoughts ───────────────────────────── */}
+      {pinnedThoughts.length > 0 && (
+        <div
+          className="px-5 py-3 shrink-0"
+          style={{
+            borderBottom: '1px solid rgba(255,255,255,0.04)',
+            background: 'rgba(251, 191, 36, 0.02)',
+          }}
+        >
+          {pinnedThoughts.map((thought) => (
+            <PinnedThought key={thought.id} thought={thought} />
           ))}
         </div>
       )}
 
-      {/* ── Thinking stream (the main content) ─────────────────── */}
-      <div ref={streamRef} className="flex-1 overflow-y-auto">
-        {stream.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-6 text-center">
-            <div className="text-display mb-3 animate-pulse">🧠</div>
-            <p className="text-body text-text-secondary">
-              Starting to observe...
-            </p>
-            <p className="text-caption text-text-tertiary mt-1">
-              PRE is watching your apps, browser, and screen activity.
-              Observations will appear here as a continuous stream.
-            </p>
-          </div>
+      {/* ── Thought stream — the consciousness ──────────────────── */}
+      <div ref={streamRef} className="flex-1 overflow-y-auto px-5 pt-4 pb-6">
+        {thoughts.length === 0 ? (
+          <WakingUp />
         ) : (
-          <div className="flex flex-col">
-            {stream.map((entry, i) => (
-              <ThinkingRow key={`${entry.timestamp}-${i}`} entry={entry} />
+          <div className="flex flex-col gap-0.5">
+            {thoughts.map((thought) => (
+              <ThoughtEntry key={thought.id} thought={thought} />
             ))}
           </div>
         )}
       </div>
 
-      {/* ── Footer status ──────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-1.5 border-t border-border text-micro text-text-tertiary">
-        <span>
-          {stream.length > 0
-            ? `${stream.length} thoughts · updated ${timeAgo(stream[0]?.timestamp ?? 0)}`
-            : 'Waiting for observations...'}
+      {/* ── Ambient footer ──────────────────────────────────────── */}
+      <footer
+        className="flex items-center justify-between px-5 py-2 shrink-0"
+        style={{ borderTop: '1px solid rgba(255,255,255,0.03)' }}
+      >
+        <span className="text-xs" style={{ color: '#2a2a26' }}>
+          {thoughts.length > 2
+            ? `${thoughts.length} thoughts`
+            : 'warming up'}
         </span>
-        {!connected && (
-          <span className="text-warning">gateway offline — running locally</span>
-        )}
-      </div>
+        <button
+          type="button"
+          onClick={() => think()}
+          className="text-xs transition-all"
+          style={{
+            color: isThinking ? '#3a3a36' : '#4a4a46',
+            cursor: isThinking ? 'default' : 'pointer',
+            background: 'none',
+            border: 'none',
+          }}
+          disabled={isThinking}
+        >
+          {isThinking ? 'thinking...' : 'think now'}
+        </button>
+      </footer>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// ThinkingRow — a single observation in the stream
+// ThoughtEntry — a single thought in the stream
 // ---------------------------------------------------------------------------
 
-function ThinkingRow({ entry }: { entry: ThinkingEntry }) {
-  const color = DOMAIN_COLORS[entry.domain] ?? '#666';
-  const emoji = DOMAIN_EMOJI[entry.domain] ?? '•';
+const CATEGORY_MARKERS: Record<string, { symbol: string; color: string }> = {
+  reflection: { symbol: '', color: '#8a8a86' },
+  insight: { symbol: '', color: '#7b9aff' },
+  pattern: { symbol: '', color: '#a78bfa' },
+  question: { symbol: '', color: '#fbbf24' },
+  prediction: { symbol: '', color: '#34d399' },
+  nudge: { symbol: '', color: '#fb923c' },
+};
+
+function ThoughtEntry({ thought }: { thought: AIThought }) {
+  const marker = CATEGORY_MARKERS[thought.category] || CATEGORY_MARKERS.reflection;
+  const isNotable = thought.importance === 'notable' || thought.importance === 'important';
 
   return (
-    <div className="flex items-start gap-3 px-4 py-2 border-b border-border/50 hover:bg-surface-raised/30 transition-colors">
-      {/* Time column */}
-      <span className="text-micro text-text-tertiary w-10 shrink-0 pt-0.5 text-right tabular-nums">
-        {formatTime(entry.timestamp)}
-      </span>
-
-      {/* Domain indicator */}
-      <span className="text-caption shrink-0 pt-0.5" style={{ color }}>
-        {emoji}
-      </span>
-
-      {/* Content */}
-      <div className="flex-1 min-w-0">
-        <p className="text-caption text-text-primary leading-relaxed">
-          {entry.text}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// InsightBanner — important insight pinned at top
-// ---------------------------------------------------------------------------
-
-function InsightBanner({ insight }: { insight: InsightData }) {
-  const [expanded, setExpanded] = useState(false);
-  const emoji = INSIGHT_EMOJI[insight.insightType] ?? '💡';
-  const isUrgent = insight.urgency === 'interrupt';
-
-  return (
-    <button
-      type="button"
-      onClick={() => setExpanded(!expanded)}
-      className={`w-full text-left px-4 py-2.5 border-b border-border/50 transition-colors ${
-        isUrgent ? 'bg-negative/5' : 'bg-accent/5'
-      } hover:bg-surface-raised/50`}
+    <div
+      className={`py-3 ${thought.isNew ? 'thought-enter' : ''}`}
+      style={{
+        borderLeft: isNotable ? `1.5px solid ${marker.color}20` : '1.5px solid transparent',
+        paddingLeft: '16px',
+        marginLeft: '-16px',
+      }}
     >
-      <div className="flex items-start gap-2">
-        <span className="text-body shrink-0">{emoji}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-0.5">
-            {isUrgent && (
-              <span className="rounded-pill px-1.5 py-0.5 text-micro font-medium bg-negative text-surface">
-                IMPORTANT
-              </span>
-            )}
-            {insight.estimatedImpact && (
-              <span className="text-micro text-positive font-medium">
-                {insight.estimatedImpact}
-              </span>
-            )}
-            <div className="flex gap-1">
-              {insight.domains.map((d) => (
-                <span key={d} className="text-micro" style={{ color: DOMAIN_COLORS[d] ?? '#666' }}>
-                  {d}
-                </span>
-              ))}
-            </div>
-          </div>
-          <p className="text-caption text-text-primary leading-snug">
-            {insight.payload.description}
-          </p>
-
-          {expanded && (
-            <div className="mt-2 flex flex-col gap-1.5">
-              <p className="text-micro text-text-secondary">
-                {insight.payload.whyItMatters}
-              </p>
-              {insight.payload.suggestedAction && (
-                <p className="text-micro text-accent font-medium">
-                  → {insight.payload.suggestedAction}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
+      <p
+        className="text-sm leading-relaxed"
+        style={{
+          color: isNotable ? '#d4d4d0' : '#9a9a96',
+          fontWeight: isNotable ? 400 : 300,
+          lineHeight: 1.7,
+        }}
+      >
+        {thought.text}
+      </p>
+      <div className="flex items-center gap-3 mt-1.5">
+        <span
+          className="text-xs"
+          style={{ color: '#2a2a26', fontSize: '10px' }}
+        >
+          {relativeTime(thought.timestamp)}
+        </span>
+        <span
+          className="text-xs"
+          style={{ color: `${marker.color}40`, fontSize: '10px' }}
+        >
+          {thought.category}
+        </span>
       </div>
-    </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PinnedThought — important insight pinned at top
+// ---------------------------------------------------------------------------
+
+function PinnedThought({ thought }: { thought: AIThought }) {
+  return (
+    <div className="py-2">
+      <p
+        className="text-sm leading-relaxed"
+        style={{
+          color: '#e8e8e4',
+          fontWeight: 400,
+          lineHeight: 1.7,
+        }}
+      >
+        {thought.text}
+      </p>
+      <span
+        className="text-xs mt-1 inline-block"
+        style={{ color: '#fbbf2440', fontSize: '10px' }}
+      >
+        pinned
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WakingUp — shown while the brain initializes
+// ---------------------------------------------------------------------------
+
+function WakingUp() {
+  return (
+    <div className="flex flex-col items-center justify-center h-full px-8">
+      <div
+        className="h-3 w-3 rounded-full mb-6 glow-breathe"
+        style={{ background: '#7b9aff' }}
+      />
+      <p
+        className="text-sm text-center leading-relaxed"
+        style={{ color: '#4a4a46', maxWidth: '280px' }}
+      >
+        Observing your digital life...
+      </p>
+      <p
+        className="text-xs text-center mt-2"
+        style={{ color: '#2a2a26', maxWidth: '240px' }}
+      >
+        I&apos;ll start thinking once I have enough to work with.
+      </p>
+    </div>
   );
 }
