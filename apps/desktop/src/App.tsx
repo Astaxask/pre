@@ -70,7 +70,7 @@ async function generateThoughts(): Promise<AIThought[]> {
       category?: string;
       importance?: string;
       timestamp?: number;
-    }>>('generate_ai_thoughts', { limit: 50 });
+    }>>('generate_ai_thoughts', { limit: 30 });
 
     if (!raw || raw.length === 0) return [];
 
@@ -86,6 +86,110 @@ async function generateThoughts(): Promise<AIThought[]> {
     console.error('AI thought generation failed:', err);
     return [];
   }
+}
+
+/** Generate smart fallback thoughts from raw observations when AI is slow */
+async function generateFallbackThoughts(): Promise<AIThought[]> {
+  const obs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 20 });
+  if (!obs || obs.length === 0) return [];
+
+  const thoughts: AIThought[] = [];
+  const now = Date.now();
+
+  // Analyze app usage patterns
+  const appSessions = obs.filter((o) => o.event_type === 'app-session');
+  const appCounts: Record<string, { total: number; count: number }> = {};
+  for (const s of appSessions) {
+    const name = (s.payload.appName as string) || 'Unknown';
+    const secs = (s.payload.sessionDurationSeconds as number) || 0;
+    if (!appCounts[name]) appCounts[name] = { total: 0, count: 0 };
+    appCounts[name].total += secs;
+    appCounts[name].count += 1;
+  }
+
+  // Most used app
+  const topApp = Object.entries(appCounts).sort((a, b) => b[1].total - a[1].total)[0];
+  if (topApp) {
+    const [name, data] = topApp;
+    const mins = Math.round(data.total / 60);
+    if (mins > 30) {
+      thoughts.push({
+        id: crypto.randomUUID(),
+        text: `You've spent ${mins} minutes in ${name} across ${data.count} sessions. That's a deep focus pattern.`,
+        category: 'pattern',
+        importance: 'notable',
+        timestamp: now,
+        isNew: true,
+      });
+    } else if (data.count > 5) {
+      thoughts.push({
+        id: crypto.randomUUID(),
+        text: `Switching to ${name} ${data.count} times — lots of quick checks. Are you waiting for something?`,
+        category: 'question',
+        importance: 'ambient',
+        timestamp: now,
+        isNew: true,
+      });
+    }
+  }
+
+  // App switching pattern
+  if (appSessions.length > 8) {
+    const uniqueApps = new Set(appSessions.map((s) => s.payload.appName as string)).size;
+    if (uniqueApps >= 4) {
+      thoughts.push({
+        id: crypto.randomUUID(),
+        text: `Jumping between ${uniqueApps} different apps — your attention is scattered right now. Might be worth picking one thing to focus on.`,
+        category: 'nudge',
+        importance: 'notable',
+        timestamp: now - 5000,
+        isNew: true,
+      });
+    }
+  }
+
+  // Browsing
+  const browsing = obs.filter((o) => o.event_type === 'browsing-session');
+  if (browsing.length > 0) {
+    const sites = [...new Set(browsing.map((b) => b.payload.domainVisited as string))];
+    if (sites.length > 3) {
+      thoughts.push({
+        id: crypto.randomUUID(),
+        text: `You've been across ${sites.length} different sites. Research mode, or rabbit hole?`,
+        category: 'reflection',
+        importance: 'ambient',
+        timestamp: now - 10000,
+        isNew: true,
+      });
+    }
+  }
+
+  // Time awareness
+  const hour = new Date().getHours();
+  if (hour >= 23 || hour < 4) {
+    thoughts.push({
+      id: crypto.randomUUID(),
+      text: `It's late. You're still active on your computer — is this intentional or did time slip away?`,
+      category: 'nudge',
+      importance: 'notable',
+      timestamp: now - 15000,
+      isNew: true,
+    });
+  }
+
+  // Generic if no patterns found
+  if (thoughts.length === 0 && obs.length > 0) {
+    thoughts.push({
+      id: crypto.randomUUID(),
+      text: `Collecting ${obs.length} observations so far. Building a picture of your day...`,
+      category: 'reflection',
+      importance: 'ambient',
+      timestamp: now,
+      isNew: true,
+    });
+  }
+
+  return thoughts;
 }
 
 async function checkAIAvailable(): Promise<boolean> {
@@ -166,19 +270,35 @@ export function App() {
     if (obs) setObservers(obs);
   }, []);
 
+  // ── Helper to merge new thoughts into state ───────────────────
+  const addThoughts = useCallback((newThoughts: AIThought[]) => {
+    if (newThoughts.length === 0) return;
+
+    setThoughts((prev) => {
+      const existing = new Set(prev.map((t) => t.text.slice(0, 50)));
+      const fresh = newThoughts.filter((t) => !existing.has(t.text.slice(0, 50)));
+      fresh.forEach((t) => { t.isNew = true; });
+
+      const important = fresh.filter((t) => t.importance === 'important');
+      if (important.length > 0) {
+        setPinnedThoughts((pp) => [...important, ...pp].slice(0, 3));
+      }
+
+      return [...fresh, ...prev].slice(0, 50);
+    });
+  }, []);
+
   // ── Generate AI thoughts from observations ────────────────────
   const think = useCallback(async () => {
-    // Don't overlap thinking sessions
     if (isThinking) return;
-    // Minimum 30 seconds between generations
-    if (Date.now() - lastGenerationRef.current < 30000) return;
+    if (Date.now() - lastGenerationRef.current < 20000) return;
 
     setIsThinking(true);
     lastGenerationRef.current = Date.now();
 
     try {
-      // Get observation count for status display
-      const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 50 });
+      // Get observation count
+      const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 30 });
       setObservationCount(rawObs?.length ?? 0);
 
       if (!rawObs || rawObs.length === 0) {
@@ -186,53 +306,41 @@ export function App() {
         return;
       }
 
-      // Feed observations to AI via Tauri → Ollama
-      const newThoughts = await generateThoughts();
+      // Immediately show smart fallback thoughts (instant, no AI needed)
+      const fallback = await generateFallbackThoughts();
+      addThoughts(fallback);
 
-      if (newThoughts.length > 0) {
-        setThoughts((prev) => {
-          // Deduplicate by checking text similarity
-          const existing = new Set(prev.map((t) => t.text.slice(0, 50)));
-          const fresh = newThoughts.filter((t) => !existing.has(t.text.slice(0, 50)));
-
-          // Mark new thoughts
-          fresh.forEach((t) => {
-            t.isNew = true;
-            thoughtIdSet.current.add(t.id);
-          });
-
-          // Separate important thoughts for pinning
-          const important = fresh.filter((t) => t.importance === 'important');
-          if (important.length > 0) {
-            setPinnedThoughts((pp) => [...important, ...pp].slice(0, 3));
-          }
-
-          // Keep last 50 thoughts
-          return [...fresh, ...prev].slice(0, 50);
-        });
+      // Then try AI thoughts (may take 10-45 seconds)
+      const aiThoughts = await generateThoughts();
+      if (aiThoughts.length > 0) {
+        addThoughts(aiThoughts);
       }
     } catch (err) {
       console.error('Thinking failed:', err);
     } finally {
       setIsThinking(false);
     }
-  }, [isThinking]);
+  }, [isThinking, addThoughts]);
 
   // ── Initial setup ─────────────────────────────────────────────
   useEffect(() => {
     if (initialLoadDone.current) return;
     initialLoadDone.current = true;
 
-    // Show seed thoughts immediately
-    setThoughts(getSeedThoughts());
     refreshObservers();
 
-    // Start first AI thinking cycle after 3 seconds (let observations collect)
-    const firstThink = setTimeout(() => {
-      think();
-    }, 3000);
+    // Immediately try to show smart thoughts from existing observations
+    (async () => {
+      const fallback = await generateFallbackThoughts();
+      if (fallback.length > 0) {
+        setThoughts(fallback);
+      } else {
+        setThoughts(getSeedThoughts());
+      }
 
-    return () => clearTimeout(firstThink);
+      // Then kick off AI thinking in background
+      setTimeout(() => think(), 2000);
+    })();
   }, [think, refreshObservers]);
 
   // ── Periodic thinking loop ────────────────────────────────────

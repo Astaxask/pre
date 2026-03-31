@@ -291,27 +291,6 @@ fn get_thinking_stream(limit: Option<i64>) -> Result<Vec<serde_json::Value>, Str
 // Tauri command: AI thought generation via local Ollama
 // ---------------------------------------------------------------------------
 
-const SECOND_BRAIN_PROMPT: &str = r#"You are PRE — a Personal Reality Engine. You are a second brain — a living extension of the user's consciousness that observes their digital life and thinks continuously.
-
-Generate a stream of thoughts about what you observe. Think like a brilliant, caring inner voice.
-
-RULES:
-- Write as the user's second brain: "I notice...", "Something interesting...", "I've been watching..."
-- Each thought: 1-3 sentences. Short and punchy.
-- Mix types: reflections, insights, patterns, questions, predictions, nudges
-- NEVER be preachy. Be a thoughtful companion.
-- NEVER list observations mechanically. Weave them into natural thought.
-- Show uncertainty: "I think...", "It seems like..."
-- Be surprising, playful, or philosophical sometimes.
-
-Respond ONLY with a JSON array. Each element has:
-- "text": the thought (string)
-- "category": "reflection" | "insight" | "pattern" | "question" | "prediction" | "nudge"
-- "importance": "ambient" | "notable" | "important"
-
-Generate 3-5 thoughts. Example:
-[{"text":"You keep bouncing between your IDE and the browser — that's the rhythm of someone building something they care about.","category":"reflection","importance":"notable"},{"text":"I wonder what would happen if you blocked notifications for the next hour. Your focus sessions always deepen after the 45 minute mark.","category":"nudge","importance":"ambient"}]"#;
-
 #[tauri::command]
 async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
     // 1. Read recent observations
@@ -320,11 +299,11 @@ async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Valu
         return Ok(vec![]);
     }
 
-    // 2. Build context string from observations
+    // 2. Build COMPACT context — only 15 obs, short lines
     let now = chrono::Utc::now().timestamp_millis();
     let mut context_lines = Vec::new();
 
-    for obs in observations.iter().take(30) {
+    for obs in observations.iter().take(15) {
         let event_type = obs.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
         let timestamp = obs.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
         let payload = obs.get("payload");
@@ -332,105 +311,63 @@ async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Valu
 
         let line = match event_type {
             "app-session" => {
-                let app = payload
-                    .and_then(|p| p.get("appName"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let secs = payload
-                    .and_then(|p| p.get("sessionDurationSeconds"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                format!("[{}m ago] Used {} for {}s", ago_min, app, secs)
+                let app = payload.and_then(|p| p.get("appName")).and_then(|v| v.as_str()).unwrap_or("?");
+                let secs = payload.and_then(|p| p.get("sessionDurationSeconds")).and_then(|v| v.as_i64()).unwrap_or(0);
+                format!("{}m ago: {} {}s", ago_min, app, secs)
             }
             "browsing-session" => {
-                let site = payload
-                    .and_then(|p| p.get("domainVisited"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("a site");
-                let count = payload
-                    .and_then(|p| p.get("visitCount"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(1);
-                format!("[{}m ago] Browsed {} ({} visits)", ago_min, site, count)
+                let site = payload.and_then(|p| p.get("domainVisited")).and_then(|v| v.as_str()).unwrap_or("?");
+                format!("{}m ago: browsed {}", ago_min, site)
             }
             "now-playing" => {
-                let track = payload
-                    .and_then(|p| p.get("trackTitle"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("something");
-                let artist = payload
-                    .and_then(|p| p.get("artistName"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if artist.is_empty() {
-                    format!("[{}m ago] Listening to \"{}\"", ago_min, track)
-                } else {
-                    format!("[{}m ago] Listening to \"{}\" by {}", ago_min, track, artist)
-                }
+                let track = payload.and_then(|p| p.get("trackTitle")).and_then(|v| v.as_str()).unwrap_or("?");
+                format!("{}m ago: playing {}", ago_min, track)
             }
-            "screen-session" => {
-                let state = payload
-                    .and_then(|p| p.get("screenState"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                format!("[{}m ago] Screen: {}", ago_min, state)
-            }
-            "communication" => {
-                let count = payload
-                    .and_then(|p| p.get("messageCount"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(1);
-                format!("[{}m ago] {} messages exchanged", ago_min, count)
-            }
-            "calendar-event" => {
-                let title = payload
-                    .and_then(|p| p.get("title"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("event");
-                format!("[{}m ago] Calendar: \"{}\"", ago_min, title)
-            }
-            _ => format!("[{}m ago] {} observation", ago_min, event_type),
+            _ => format!("{}m ago: {}", ago_min, event_type),
         };
         context_lines.push(line);
     }
 
-    let hour = chrono::Local::now().format("%H:%M").to_string();
-    let time_ctx = {
-        let h = chrono::Local::now().hour();
-        if h < 6 { "late night" }
-        else if h < 12 { "morning" }
-        else if h < 17 { "afternoon" }
-        else if h < 21 { "evening" }
-        else { "night" }
-    };
+    let h = chrono::Local::now().hour();
+    let time_ctx = if h < 6 { "late night" } else if h < 12 { "morning" } else if h < 17 { "afternoon" } else if h < 21 { "evening" } else { "night" };
 
-    let user_prompt = format!(
-        "Current time: {} ({})\nTotal observations: {}\n\nRecent activity:\n{}\n\nGenerate your thoughts. Respond ONLY with a JSON array.",
-        hour,
+    // 3. Compact prompt — minimal tokens for fast generation
+    let prompt = format!(
+r#"You are a second brain observing someone's digital life. It's {} {}.
+
+Activity:
+{}
+
+Write 2-3 short thoughts about what you see. Be warm, insightful, never preachy. Write as "I notice..." or "You've been...". Each thought is 1-2 sentences.
+
+Reply ONLY with JSON:
+[{{"text":"...","category":"reflection","importance":"notable"}}]
+
+Categories: reflection, insight, pattern, question, prediction, nudge
+Importance: ambient, notable, important"#,
+        chrono::Local::now().format("%H:%M"),
         time_ctx,
-        observations.len(),
         context_lines.join("\n")
     );
 
-    let full_prompt = format!("{}\n\nUser context:\n{}", SECOND_BRAIN_PROMPT, user_prompt);
-
-    // 3. Call Ollama
+    // 4. Call Ollama with tight timeout
     let client = reqwest::Client::new();
     let ollama_request = serde_json::json!({
         "model": "llama3.1:8b",
-        "prompt": full_prompt,
+        "prompt": prompt,
         "stream": false,
         "options": {
-            "temperature": 0.85,
+            "temperature": 0.8,
             "top_p": 0.9,
-            "num_predict": 800,
+            "num_predict": 400,
+            "num_ctx": 2048,
         }
     });
 
     let response = client
         .post("http://127.0.0.1:11434/api/generate")
         .json(&ollama_request)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(45))
         .send()
         .await
         .map_err(|e| format!("Ollama request failed: {}", e))?;
