@@ -46,7 +46,8 @@ function makeDeps(overrides: Partial<SimulationEngineDeps> = {}): SimulationEngi
       recentByDomain: vi.fn().mockResolvedValue([]),
       byTimeRange: vi.fn().mockResolvedValue(makeEvents(30, 'body', 30)),
       goals: vi.fn().mockResolvedValue([]),
-      triggerLog: vi.fn().mockResolvedValue([]),
+      triggerLog: vi.fn(),
+      byGoalId: vi.fn().mockResolvedValue([]).mockResolvedValue([]),
     },
     sidecar: {
       forecastDomain: vi.fn().mockResolvedValue({

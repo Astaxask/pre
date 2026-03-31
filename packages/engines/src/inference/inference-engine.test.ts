@@ -42,7 +42,8 @@ function makeMockDeps(overrides: Partial<InferenceEngineDeps> = {}): InferenceEn
       recentByDomain: vi.fn().mockResolvedValue([]),
       byTimeRange: vi.fn().mockResolvedValue([]),
       goals: vi.fn().mockResolvedValue([]),
-      triggerLog: vi.fn().mockResolvedValue([]),
+      triggerLog: vi.fn(),
+      byGoalId: vi.fn().mockResolvedValue([]).mockResolvedValue([]),
     },
     sidecar: {
       detectPatterns: vi.fn().mockResolvedValue([]),

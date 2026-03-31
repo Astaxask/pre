@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Alert, LifeInsight } from '../types.js';
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Alert, LifeInsight } from "../types.js";
 
 type GatewayMessage = {
   type: string;
   payload: unknown;
 };
 
-const GATEWAY_URL = 'ws://localhost:18789';
+const GATEWAY_URL = "ws://localhost:18789";
 const MAX_BACKOFF_MS = 30_000;
 
 export function useGateway() {
@@ -25,22 +25,22 @@ export function useGateway() {
     const ws = new WebSocket(GATEWAY_URL);
     wsRef.current = ws;
 
-    ws.addEventListener('open', () => {
+    ws.addEventListener("open", () => {
       setConnected(true);
       retriesRef.current = 0;
     });
 
-    ws.addEventListener('message', (event: MessageEvent) => {
+    ws.addEventListener("message", (event: MessageEvent) => {
       try {
         const data = JSON.parse(String(event.data)) as GatewayMessage;
         setLastMessage(data);
 
-        if (data.type === 'alert') {
+        if (data.type === "alert") {
           setAlerts((prev) => [data.payload as Alert, ...prev]);
-        } else if (data.type === 'alert-dismissed') {
-          const dismissedId = (data as { alertId: string }).alertId;
+        } else if (data.type === "alert-dismissed") {
+          const dismissedId = (data as unknown as { alertId: string }).alertId;
           setAlerts((prev) => prev.filter((a) => a.id !== dismissedId));
-        } else if (data.type === 'insight-update') {
+        } else if (data.type === "insight-update") {
           setInsights(data.payload as LifeInsight[]);
         }
       } catch {
@@ -48,12 +48,12 @@ export function useGateway() {
       }
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener("close", () => {
       setConnected(false);
       scheduleReconnect();
     });
 
-    ws.addEventListener('error', () => {
+    ws.addEventListener("error", () => {
       ws.close();
     });
   }, []);
