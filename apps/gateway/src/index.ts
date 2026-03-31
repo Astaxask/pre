@@ -129,8 +129,8 @@ async function main(): Promise<void> {
         sidecarProcess = null;
       });
 
-      // Wait up to 10 seconds for sidecar to be ready
-      const deadline = Date.now() + 10_000;
+      // Wait up to 30 seconds for sidecar to be ready (sentence_transformers is slow to load)
+      const deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 500));
         sidecarReady = await sidecarClient.isReady();
@@ -140,8 +140,7 @@ async function main(): Promise<void> {
       if (sidecarReady) {
         console.log('[PRE Gateway] Sidecar connected and ready');
       } else {
-        console.warn('[PRE Gateway] Sidecar unavailable — embedding and pattern detection disabled');
-        console.warn('[PRE Gateway] Fix the sidecar error above and restart the gateway');
+        console.warn('[PRE Gateway] Sidecar not ready yet — will retry before status summary');
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -338,6 +337,18 @@ async function main(): Promise<void> {
 
   // Step 10: Emit ready
   bus.emit('gateway-ready', { timestamp: Date.now() });
+
+  // Final sidecar retry — it may have started while adapters were initializing
+  if (!sidecarReady) {
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      sidecarReady = await sidecarClient.isReady();
+      if (sidecarReady) {
+        console.log('[PRE Gateway] Sidecar connected and ready (late start)');
+        break;
+      }
+    }
+  }
 
   console.log('\n── PRE Gateway Status ──────────────────');
   console.log(`  SQLite:    ✓ connected`);
