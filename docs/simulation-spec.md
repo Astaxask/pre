@@ -11,7 +11,9 @@
 
 ## What the simulation core is
 
-The simulation core answers one question: **"If I make this decision, what is likely to happen across my life domains?"**
+The simulation core answers one question: **"If this decision is made, what is likely to happen across the user's life domains?"**
+
+**Simulations are primarily auto-triggered, not user-initiated.** The inference engine detects forming decisions from behavior patterns (browsing job listings, researching locations, comparing prices, scheduling doctor appointments) and proactively runs simulations. Results surface as insight cards. The user can also manually request simulations as a fallback, but this is not the primary interaction model.
 
 It does this by:
 
@@ -42,7 +44,7 @@ The simulation must never show results without disclosing which mode it ran in a
 
 ## Decision taxonomy
 
-Before running any simulation, the user's natural-language decision is parsed into a structured `DecisionDescriptor`. The local LLM performs this parsing. The descriptor determines which domains are affected and which impact functions apply.
+Before running any simulation, the decision is parsed into a structured `DecisionDescriptor`. For auto-triggered simulations, the inference engine constructs the descriptor from observed behavior patterns. For manual fallback, the local LLM parses user input. The descriptor determines which domains are affected and which impact functions apply.
 
 ```typescript
 type DecisionDescriptor = {

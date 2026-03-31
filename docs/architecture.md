@@ -30,15 +30,18 @@
 
 ## 1. Philosophy
 
-### The three laws of PRE architecture
+### The four laws of PRE architecture
 
-**Law 1 — Local first, cloud never by default.**
+**Law 1 — Zero input, maximum output.**
+The user should never have to manually enter data, create goals, or configure anything beyond initial setup. PRE is an autonomous second brain that silently observes digital life, builds understanding, and presents insights — all without being asked. If a feature requires the user to do cognitive work to feed the system, redesign it until it doesn't.
+
+**Law 2 — Local first, cloud never by default.**
 Every capability must work with zero internet connection and zero cloud API calls. Cloud models are an optional upgrade path, never a dependency. A user with no API keys must still get value.
 
-**Law 2 — Data is the product; the software is the delivery mechanism.**
+**Law 3 — Data is the product; the software is the delivery mechanism.**
 The value of PRE compounds over time as the memory layer grows. Architectural decisions that risk data integrity, data loss, or data exposure are existential threats — treat them as such. Migrations, backups, and encryption are first-class features, not afterthoughts.
 
-**Law 3 — The system earns trust through restraint.**
+**Law 4 — The system earns trust through restraint.**
 PRE has access to the most sensitive data in a person's life. Every feature must be designed with the minimum footprint necessary. The inference engine reads broadly but acts narrowly. The proactive agent interrupts rarely and explains always. The simulation core shows uncertainty rather than false confidence.
 
 ---
@@ -121,16 +124,24 @@ type AdapterResult = {
 };
 ```
 
+**Adapters are the lifeblood of PRE.** The more passive signals we collect, the better the autonomous model. Every adapter collects data silently after initial setup — the user never interacts with adapters directly.
+
 **Adapter sync schedule (configurable, these are defaults):**
 
-| Adapter         | Interval         | Rationale                                        |
-| --------------- | ---------------- | ------------------------------------------------ |
-| Plaid           | Every 6 hours    | Bank data updates a few times daily              |
-| HealthKit       | Every 15 minutes | Sleep/HRV data arrives throughout the day        |
-| Oura / WHOOP    | Every 30 minutes | Recovery scores finalize after wakeup            |
-| Google Calendar | Every 10 minutes | Calendar changes need to be near real-time       |
-| Gmail           | Every 30 minutes | Only metadata, no content — relationship signals |
-| Garmin          | Every 1 hour     | Workout data syncs after activity completes      |
+| Adapter           | Domain(s)   | Interval         | Signal type                                       | Status      |
+| ----------------- | ----------- | ---------------- | ------------------------------------------------- | ----------- |
+| Plaid             | money       | Every 6 hours    | Transactions, balances, bills                      | **Built**   |
+| Google Calendar   | time        | Every 10 minutes | Events, duration, recurring patterns               | **Built**   |
+| Apple HealthKit   | body        | Every 15 minutes | Sleep, HRV, steps, workouts, heart rate            | **Next**    |
+| WHOOP             | body        | Every 30 minutes | Recovery, strain, sleep stages                     | **Planned** |
+| Oura              | body        | Every 30 minutes | Readiness, sleep quality, temperature              | **Planned** |
+| Screen Time (iOS) | time, mind  | Every 30 minutes | App usage, pickups, focus modes                    | **Planned** |
+| Gmail metadata    | people      | Every 30 minutes | Communication frequency, response latency          | **Planned** |
+| macOS Screen Time | time, mind  | Every 30 minutes | Application usage, focus time patterns             | **Planned** |
+| Browser history   | mind, time  | Every 1 hour     | Topics of interest, time allocation                | **Planned** |
+| Garmin            | body        | Every 1 hour     | Workouts, body battery, stress                     | **Planned** |
+| Location (coarse) | world       | Every 1 hour     | Home/work/transit patterns (no GPS coordinates)    | **Planned** |
+| Spotify/Music     | mind        | Every 1 hour     | Listening patterns for mood inference              | **Planned** |
 
 **Adapter failure policy:**
 
@@ -144,11 +155,14 @@ Every `LifeEvent` produced by an adapter must have `privacyLevel` set explicitly
 
 **Build order for adapters:**
 
-1. `plaid` — exercises the full L1→L2 pipeline, has good sandbox environment
-2. `google-calendar` — simple OAuth flow, structured data, low privacy risk
-3. `healthkit` — macOS/iOS only, but covers the most critical body domain
-4. `gmail` — metadata only (subject omitted, body never touched), relationship signals
-5. `oura` / `whoop` — similar structure, pick whichever you have hardware for first
+1. ~~`plaid`~~ — **Done.** Financial transactions and balances
+2. ~~`google-calendar`~~ — **Done.** Calendar events and time patterns
+3. `healthkit` — **Next.** Covers the critical body domain, passive data from iPhone/Apple Watch
+4. `whoop` / `oura` — Recovery and sleep quality signals (body domain depth)
+5. `screen-time` — Phone and computer usage patterns (time + mind domains)
+6. `gmail` — metadata only (subject omitted, body never touched), relationship signals
+7. `browser-history` — Interest tracking and time allocation (mind domain)
+8. `garmin` — Workout data and body battery (body domain breadth)
 
 ---
 
@@ -308,7 +322,7 @@ type InsightType =
   | "correlation"; // Two domain signals are moving together
 ```
 
-**Inference engine pipeline (runs every 15 minutes via cron):**
+**Inference engine pipeline (runs every 15 minutes via cron AND after every sync):**
 
 ```
 1. SNAPSHOT
@@ -326,20 +340,36 @@ type InsightType =
    For each detected pattern, generate a LifeInsight via callModel()
    with privacyLevel='private', task='pattern-analysis'
 
-5. GOAL DRIFT CHECK
-   For each active goal, compare recent domain events to goal trajectory
-   If drift exceeds threshold, emit a 'goal-drift' insight
+5. AUTONOMOUS GOAL GENERATION
+   Analyze behavior patterns and auto-create goals:
+   - Detected consistent running → "Maintain running habit" (body)
+   - Spending increased 30%+ → "Monitor discretionary spending" (money)
+   - Sleep declining 3+ nights → "Improve sleep consistency" (body)
+   - Deep work hours dropping → "Protect focus time" (time)
+   Goals are created with source='inferred', confidence score, and
+   can be dismissed by the user (which trains the system)
 
-6. PUBLISH
+6. GOAL DRIFT CHECK
+   For each active goal (user-created AND auto-generated),
+   compare recent domain events to goal trajectory.
+   If drift exceeds threshold, emit a 'goal-drift' insight.
+   Auto-archive stale goals that have had no activity for 60+ days.
+
+7. SELF-MAINTENANCE
+   - Update confidence scores on existing insights
+   - Prune expired insights from the store
+   - Adjust sync frequency recommendations based on data freshness
+
+8. PUBLISH
    Write new insights to the insight store (in-memory, TTL-keyed)
+   Write auto-generated goals to the goals table
    Notify the proactive agent of new insights via the event bus
 ```
 
 **What the inference engine must NOT do:**
 
-- Write to the `life_events` table (it reads only)
 - Call cloud models (all inference is local)
-- Make decisions — it surfaces patterns, it does not act on them
+- Make decisions on behalf of the user — it surfaces patterns, creates goals, but the user retains control
 - Run expensive operations synchronously — all heavy work goes through BullMQ
 
 ---
@@ -399,7 +429,10 @@ interface TriggerRule {
 
 #### 3.4.3 Simulation core
 
-**What it does:** Given a decision the user is considering, samples from probability distributions built from their historical data to model likely outcomes across all life domains, projected forward in time.
+**What it does:** Samples from probability distributions built from the user's historical data to model likely outcomes across all life domains, projected forward in time. Simulations can be triggered in two ways:
+
+1. **Auto-triggered by the inference engine** — when the system detects a forming decision (browsing job listings, researching a new city, looking at gym memberships, considering a large purchase), it proactively runs a simulation and surfaces the result as an insight
+2. **On-demand** — as a fallback, the user can request a simulation through the UI, but this is NOT the primary path
 
 **This is not prediction. It is consequence modeling.**
 
@@ -407,9 +440,10 @@ The output is always expressed as a range with confidence intervals. The UI must
 
 ```typescript
 type SimulationRequest = {
-  decision: DecisionDescription; // Natural language description of what the user might do
+  decision: DecisionDescription; // Auto-detected or user-described decision
   horizon: "30d" | "90d" | "180d"; // How far forward to project
-  domains: LifeDomain[]; // Which domains to model (user selects)
+  domains: LifeDomain[]; // Which domains to model (auto or user selects)
+  trigger: "auto" | "manual"; // How this simulation was initiated
 };
 
 type SimulationResult = {
@@ -453,9 +487,13 @@ type Distribution = {
 **Simulation pipeline:**
 
 ```
-1. PARSE DECISION
-   User inputs decision in natural language
-   Local LLM extracts structured DecisionDescriptor:
+1. DETECT OR PARSE DECISION
+   Auto-trigger: Inference engine detects behavior patterns that suggest a
+   forming decision (browsing job sites, researching locations, comparing prices)
+   and constructs a DecisionDescriptor automatically.
+
+   Manual fallback: User describes a decision; local LLM extracts structured
+   DecisionDescriptor:
      - decision type (job change / financial / relationship / habit / location)
      - affected domains
      - key variables
@@ -610,7 +648,8 @@ Menu structure:
 
 - Receives push notifications for `severity='warning'` and `severity='intervention'` alerts
 - Full insight browser for reading patterns on the go
-- Quick goal logging ("30 min run logged") that writes directly to `mind` domain
+- Auto-generated goals visible with progress tracking — no manual goal creation required
+- Acts as a passive data source itself (HealthKit, Screen Time, location context)
 - Does NOT run the gateway — connects to the desktop gateway over local network via Tailscale
 
 **Web panel (developer/power-user surface):**
@@ -680,16 +719,17 @@ If alerts generated:
   Send push notification (mobile) for severity >= 'warning'
 ```
 
-### Simulation flow (user request → result)
+### Simulation flow (auto-triggered or on-demand)
 
 ```
-Surface sends { type: 'simulate', payload: SimulationRequest }
+Auto-trigger: Inference engine detects forming decision from behavior patterns
+OR Manual: Surface sends { type: 'simulate', payload: SimulationRequest }
   ↓
-Gateway routes to simulate.ts route handler
+Gateway routes to simulation engine
   ↓
 Check cache (24h TTL keyed by decision hash)
   ↓ [cache miss]
-Local LLM parses decision → DecisionDescriptor
+Local LLM parses/validates decision → DecisionDescriptor
   ↓
 For each affected domain:
   sidecar.forecast_domain(domain, 90d of history) → baseline
@@ -700,9 +740,10 @@ Local LLM generates narrative from distributions
   ↓
 Assemble SimulationResult, cache it
   ↓
-Gateway sends { type: 'simulation-result', payload: SimulationResult }
-  ↓
-Surface renders distributions as range charts with confidence intervals
+Auto-triggered: Publish as insight (type='simulation-available')
+  → Surface shows as an insight card: "PRE noticed you might be considering X..."
+Manual: Gateway sends { type: 'simulation-result', payload: SimulationResult }
+  → Surface renders distributions as range charts with confidence intervals
 ```
 
 ---
@@ -777,38 +818,41 @@ All user-configurable settings live in `~/.pre/config.json`. Never in the databa
 
 ### Phase 1 — Foundation (months 1–3)
 
-Goal: data flows, nothing more.
+Goal: passive data flows from multiple sources.
 
-- All L1 adapters running and writing to L2
+- 5+ adapters silently collecting data (money, time, body, people, mind)
 - SQLite + LanceDB layer solid, encrypted, tested
 - Gateway running stably with no crashes over a 7-day period
-- Web panel showing live event timeline
+- Web panel showing live event timeline populated entirely by adapters
+- **Zero manual input required** — a user who connects accounts and does nothing should see data flowing
 
-### Phase 2 — Memory (months 3–5)
+### Phase 2 — Autonomous Intelligence (months 3–5)
 
-Goal: the system knows you.
+Goal: the system thinks for itself.
 
 - Embeddings generated for all historical events
-- Semantic search working (find all events related to "stress at work")
-- Inference engine detecting at least 3 real patterns on real personal data
-- Goals CRUD working, basic drift detection live
+- Inference engine detecting cross-domain patterns on real personal data
+- **AI-generated goals** appearing automatically from observed behavior
+- Auto-triggered simulations when behavior suggests forming decisions
+- Proactive alerts firing with genuine utility (sleep + spending correlations, etc.)
 
-### Phase 3 — Agency (months 5–8)
+### Phase 3 — Self-Maintaining Brain (months 5–8)
 
-Goal: the system acts for you.
+Goal: the system maintains and improves itself.
 
-- All V1 trigger rules deployed and tuned
-- macOS menu bar app shipping
-- Proactive alerts with zero false positives over 30-day period
-- Simulation core working for at least 2 decision types (financial, time commitment)
+- All V1 trigger rules deployed and auto-tuned based on user feedback
+- macOS menu bar app shipping as primary surface
+- Goal lifecycle fully autonomous: creation, tracking, archival — all AI-driven
+- System adjusts its own sync frequencies and inference schedules based on data patterns
+- Simulation core uses real personal analogs, not just generic priors
 
-### Phase 4 — Intelligence (months 8–12)
+### Phase 4 — Deep Understanding (months 8–12)
 
-Goal: the system understands you better than you understand yourself.
+Goal: the system understands the user better than they understand themselves.
 
-- Cross-domain correlation models trained on personal data (not generic priors)
-- Simulation confidence improves with data volume (verify this empirically)
-- Mobile companion app for alerts and quick logging
+- Cross-domain correlation models trained on personal data
+- Behavioral prediction: "You typically overspend after poor sleep weeks"
+- Mobile companion as passive data source (HealthKit, Screen Time, location)
 - Optional: multi-device sync (gateway-to-gateway, fully encrypted, no cloud relay)
 
 ### Phase 5 — Ecosystem (12+ months)
@@ -818,7 +862,7 @@ Goal: the system as a platform.
 - Public adapter SDK so third parties can build new data sources
 - Export format for full personal data (portability as a right, not a feature)
 - Federated insight sharing: share pattern types (not data) with other PRE users to improve priors
-- Explore: on-device fine-tuning of the local model on personal communication patterns
+- On-device fine-tuning of the local model on personal behavior patterns
 
 ---
 
@@ -858,27 +902,12 @@ Early prototypes showed single-value outputs ("your sleep will improve by 45 min
 
 ---
 
-_Last updated: 2026-03-29_
-_Maintained by: project owner + AI co-architect_
-_Next review: after Phase 1 completion_
-**2026-03-29 — Python sidecar over native TypeScript ML**
+**2026-03-31 — Zero-input as a first principle**
 
-LlamaIndex, Prophet, and proper Monte Carlo sampling libraries are mature in Python. The TypeScript ML ecosystem (while improving) lacks equivalents with the same stability and community validation. Rather than port these or use immature alternatives, we run a Python sidecar and accept the IPC overhead. For inference tasks that take seconds anyway, sub-millisecond IPC cost is irrelevant.
+We decided that every feature must be evaluated against the question "Does this require the user to do cognitive work?" Manual data entry, journaling prompts, and explicit goal creation were all redesigned. Goals are now auto-generated by the inference engine from observed behavior. Simulations are auto-triggered when the system detects forming decisions. The user's role is to review, accept, or dismiss — never to create from scratch.
 
 ---
 
-**2026-03-29 — Local-first even at the cost of capability**
-
-We had an early debate about whether to build cloud-first (simpler architecture, better models immediately) and add local as a later option. We chose local-first because: (1) the trust model of this product requires it — users will not connect bank and health data to a cloud service they don't control; (2) once you build cloud-first, local becomes an afterthought; (3) on-device model quality is improving fast enough that this is a time-limited disadvantage.
-
----
-
-**2026-03-29 — Simulation output must express uncertainty**
-
-Early prototypes showed single-value outputs ("your sleep will improve by 45 minutes"). Users found these compelling but they were false confidence. We mandated p10/p50/p90 distributions after recognizing that the real value of simulation is helping users understand the _range_ of outcomes, not predicting a specific one. A simulation that shows "your sleep will be somewhere between 30 minutes worse and 90 minutes better, with the most likely outcome being 20 minutes better" is more honest and ultimately more useful.
-
----
-
-_Last updated: 2026-03-29_
+_Last updated: 2026-03-31_
 _Maintained by: project owner + AI co-architect_
 _Next review: after Phase 1 completion_
