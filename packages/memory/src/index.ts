@@ -8,7 +8,7 @@ export {
 
 export { deriveKey, encryptPayload, decryptPayload } from './encrypt.js';
 
-export { createWriter, type MemoryWriter, type BatchWriteResult } from './writer.js';
+export { createWriter, type MemoryWriter, type BatchWriteResult, type TriggerLogWrite, type GoalWrite } from './writer.js';
 
 export {
   createReader,
@@ -16,3 +16,5 @@ export {
   type Goal,
   type TriggerLogEntry,
 } from './reader.js';
+
+export { openDatabase } from './db.js';

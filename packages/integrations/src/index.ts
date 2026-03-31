@@ -6,3 +6,4 @@ export type {
 } from './types.js';
 
 export { PlaidAdapter } from './plaid/plaid-adapter.js';
+export { GoogleCalendarAdapter } from './google-calendar/google-calendar-adapter.js';
