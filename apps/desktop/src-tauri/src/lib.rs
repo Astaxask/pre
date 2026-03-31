@@ -142,6 +142,151 @@ async fn toggle_observer(
 }
 
 // ---------------------------------------------------------------------------
+// Tauri commands: read local observation buffer (works without gateway)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalObservation {
+    id: i64,
+    event_json: String,
+    created_at: i64,
+    sent: bool,
+}
+
+#[tauri::command]
+fn get_recent_observations(limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let db_path = std::path::PathBuf::from(&home)
+        .join(".pre")
+        .join("observer-buffer.db");
+
+    if !db_path.exists() {
+        return Ok(vec![]);
+    }
+
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("Failed to open buffer DB: {}", e))?;
+
+    let max = limit.unwrap_or(100);
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_json, created_at FROM event_buffer ORDER BY created_at DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let results: Vec<serde_json::Value> = stmt
+        .query_map([max], |row| {
+            let json_str: String = row.get(0)?;
+            let created_at: i64 = row.get(1)?;
+            Ok((json_str, created_at))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .filter_map(|(json_str, _)| serde_json::from_str(&json_str).ok())
+        .collect();
+
+    Ok(results)
+}
+
+/// Generate human-readable observation stream from local buffer data.
+/// This works entirely offline — no gateway or LLM needed.
+#[tauri::command]
+fn get_thinking_stream(limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
+    let observations = get_recent_observations(limit)?;
+    let mut thoughts: Vec<serde_json::Value> = Vec::new();
+
+    for obs in &observations {
+        let event_type = obs.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+        let source = obs.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let domain = obs.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+        let timestamp = obs.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let payload = obs.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+
+        let text = match event_type {
+            "app-session" => {
+                let app = payload.get("appName").and_then(|v| v.as_str()).unwrap_or("an app");
+                let secs = payload.get("sessionDurationSeconds").and_then(|v| v.as_i64()).unwrap_or(0);
+                if secs > 3600 {
+                    format!("You spent {:.1} hours in {}. That's a deep session.", secs as f64 / 3600.0, app)
+                } else if secs > 600 {
+                    format!("Spent {} minutes in {}.", secs / 60, app)
+                } else {
+                    format!("Quick switch to {} ({} seconds).", app, secs)
+                }
+            }
+            "browsing-session" => {
+                let site = payload.get("domainVisited").and_then(|v| v.as_str()).unwrap_or("a website");
+                let count = payload.get("visitCount").and_then(|v| v.as_i64()).unwrap_or(1);
+                if count > 5 {
+                    format!("Visited {} {} times — you keep coming back to this.", site, count)
+                } else if count > 1 {
+                    format!("Browsed {} ({} visits).", site, count)
+                } else {
+                    format!("Visited {}.", site)
+                }
+            }
+            "now-playing" => {
+                let track = payload.get("trackTitle").and_then(|v| v.as_str()).unwrap_or("something");
+                let artist = payload.get("artistName").and_then(|v| v.as_str()).unwrap_or("");
+                if artist.is_empty() {
+                    format!("Listening to \"{}\".", track)
+                } else {
+                    format!("Listening to \"{}\" by {}.", track, artist)
+                }
+            }
+            "screen-session" => {
+                let state = payload.get("screenState").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let secs = payload.get("idleDurationSeconds").and_then(|v| v.as_i64()).unwrap_or(0);
+                match state {
+                    "idle" if secs > 1800 => format!("You've been away for {} minutes. Taking a break.", secs / 60),
+                    "idle" => format!("Went idle for {} minutes.", secs / 60),
+                    "active" => "Back at the screen.".to_string(),
+                    _ => format!("Screen state: {}.", state),
+                }
+            }
+            "communication" => {
+                let direction = payload.get("direction").and_then(|v| v.as_str()).unwrap_or("sent");
+                let count = payload.get("messageCount").and_then(|v| v.as_i64()).unwrap_or(1);
+                let is_group = payload.get("isGroup").and_then(|v| v.as_bool()).unwrap_or(false);
+                let chat_type = if is_group { "a group chat" } else { "a conversation" };
+                if direction == "sent" {
+                    format!("{} {} message{} in {}.",
+                        if count > 5 { "Actively chatting —" } else { "Sent" },
+                        count, if count != 1 { "s" } else { "" }, chat_type)
+                } else {
+                    format!("Received {} message{} in {}.", count, if count != 1 { "s" } else { "" }, chat_type)
+                }
+            }
+            "calendar-event" => {
+                let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("an event");
+                let mins = payload.get("durationMinutes").and_then(|v| v.as_i64()).unwrap_or(0);
+                if mins > 60 {
+                    format!("\"{}\" — {:.1} hour block on your calendar.", title, mins as f64 / 60.0)
+                } else {
+                    format!("\"{}\" — {} min event.", title, mins)
+                }
+            }
+            _ => {
+                format!("{} observation from {}.", domain, source)
+            }
+        };
+
+        thoughts.push(serde_json::json!({
+            "text": text,
+            "domain": domain,
+            "event_type": event_type,
+            "timestamp": timestamp,
+            "source": source,
+        }));
+    }
+
+    Ok(thoughts)
+}
+
+// ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
 
@@ -157,6 +302,8 @@ pub fn run() {
             get_tray_state,
             get_observer_status,
             toggle_observer,
+            get_recent_observations,
+            get_thinking_stream,
         ])
         .setup(|app| {
             // ── Tray icon ────────────────────────────────────────────
