@@ -133,11 +133,14 @@ fn main() {
 
     for (name, generator) in icons {
         let path = icons_dir.join(name);
-        // Always regenerate to keep in sync with the code
-        let img = generator();
-        img.save(&path).unwrap_or_else(|e| {
-            panic!("Failed to save {}: {}", path.display(), e);
-        });
+        // Only generate if the file doesn't exist yet — avoids triggering
+        // Tauri's file watcher which would cause an infinite rebuild loop
+        if !path.exists() {
+            let img = generator();
+            img.save(&path).unwrap_or_else(|e| {
+                panic!("Failed to save {}: {}", path.display(), e);
+            });
+        }
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
