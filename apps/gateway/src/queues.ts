@@ -13,14 +13,21 @@ export type InferenceJobData = {
   trigger: 'scheduled' | 'post-sync';
 };
 
+export type SnoozeJobData = {
+  alertId: string;
+  alert: unknown;
+};
+
 let syncQueue: Queue<SyncJobData> | null = null;
 let embedQueue: Queue<EmbedJobData> | null = null;
 let inferenceQueue: Queue<InferenceJobData> | null = null;
+let snoozeQueue: Queue<SnoozeJobData> | null = null;
 
 export function initQueues(redisOpts: RedisOptions): {
   syncQueue: Queue<SyncJobData>;
   embedQueue: Queue<EmbedJobData>;
   inferenceQueue: Queue<InferenceJobData>;
+  snoozeQueue: Queue<SnoozeJobData>;
 } {
   syncQueue = new Queue<SyncJobData>('adapter-sync', {
     connection: redisOpts,
@@ -52,7 +59,17 @@ export function initQueues(redisOpts: RedisOptions): {
     },
   });
 
-  return { syncQueue, embedQueue, inferenceQueue };
+  snoozeQueue = new Queue<SnoozeJobData>('snooze-alert', {
+    connection: redisOpts,
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'fixed', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    },
+  });
+
+  return { syncQueue, embedQueue, inferenceQueue, snoozeQueue };
 }
 
 export async function enqueueSyncJob(source: string): Promise<void> {
@@ -69,6 +86,14 @@ export async function enqueueEmbedJob(eventId: string): Promise<void> {
   });
 }
 
+export async function enqueueSnoozeJob(alertId: string, alert: unknown, delayMs: number): Promise<void> {
+  if (!snoozeQueue) throw new Error('Queues not initialized');
+  await snoozeQueue.add(`snooze-${alertId}`, { alertId, alert }, {
+    jobId: `snooze-${alertId}-${Date.now()}`,
+    delay: delayMs,
+  });
+}
+
 export async function enqueueInferenceJob(trigger: 'scheduled' | 'post-sync'): Promise<void> {
   if (!inferenceQueue) throw new Error('Queues not initialized');
   await inferenceQueue.add(`inference-${trigger}`, { trigger }, {
@@ -80,4 +105,5 @@ export async function closeQueues(): Promise<void> {
   await syncQueue?.close();
   await embedQueue?.close();
   await inferenceQueue?.close();
+  await snoozeQueue?.close();
 }

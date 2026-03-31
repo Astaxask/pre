@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { eq, and, gte, lte, inArray } from 'drizzle-orm';
+import { eq, and, gte, lte, inArray, sql } from 'drizzle-orm';
 import type { LifeDomain, LifeEvent, DomainPayload } from '@pre/shared';
 import { lifeEvents, goals, triggerLog } from './schema.js';
 import { decryptPayload } from './encrypt.js';
@@ -30,6 +30,7 @@ export type MemoryReader = {
     end: number,
     domains?: LifeDomain[],
   ): Promise<LifeEvent[]>;
+  byGoalId(goalId: string, days: number): Promise<LifeEvent[]>;
   goals(status?: string): Promise<Goal[]>;
   triggerLog(ruleId: string, since: number): Promise<TriggerLogEntry[]>;
 };
@@ -109,6 +110,22 @@ export function createReader(
         .select()
         .from(lifeEvents)
         .where(and(...conditions))
+        .all();
+
+      return Promise.all(rows.map((row) => hydrateRow(row, masterKey)));
+    },
+
+    async byGoalId(goalId: string, days: number): Promise<LifeEvent[]> {
+      const cutoff = Date.now() - days * 86_400_000;
+      const rows = drizzleDb
+        .select()
+        .from(lifeEvents)
+        .where(
+          and(
+            gte(lifeEvents.timestamp, cutoff),
+            sql`json_extract(${lifeEvents.payload}, '$.goalId') = ${goalId}`,
+          ),
+        )
         .all();
 
       return Promise.all(rows.map((row) => hydrateRow(row, masterKey)));
