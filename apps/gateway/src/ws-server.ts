@@ -843,6 +843,55 @@ async function handleWebQuery(
       break;
     }
 
+    case 'recent-activity': {
+      // Return the most recent events (last 24h) for the desktop live feed
+      const since = Date.now() - 24 * 86_400_000;
+      const recentAll = await reader.byTimeRange(since, Date.now());
+      recentAll.sort((a, b) => b.timestamp - a.timestamp);
+      const capped = recentAll.slice(0, 100);
+
+      sendTo(ws, {
+        type: 'query-result',
+        payload: {
+          events: capped.map((e) => ({
+            id: e.id,
+            source: e.source,
+            domain: e.domain,
+            event_type: e.eventType,
+            timestamp: e.timestamp,
+            payload: e.payload,
+          })),
+        },
+      });
+      break;
+    }
+
+    case 'daily-summary': {
+      // Generate a daily summary using the model
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayEvents = await reader.byTimeRange(todayStart.getTime(), Date.now());
+
+      if (todayEvents.length === 0) {
+        sendTo(ws, { type: 'daily-summary', payload: { text: null } });
+        break;
+      }
+
+      // Build a brief summary without calling the model (fast path)
+      const domainCounts = new Map<string, number>();
+      for (const e of todayEvents) {
+        domainCounts.set(e.domain, (domainCounts.get(e.domain) ?? 0) + 1);
+      }
+
+      const parts = Array.from(domainCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([d, c]) => `${c} ${d} events`);
+
+      const summaryText = `Today so far: ${parts.join(', ')}. ${todayEvents.length} total observations.`;
+      sendTo(ws, { type: 'daily-summary', payload: { text: summaryText } });
+      break;
+    }
+
     case 'goals': {
       const goalsList = await reader.goals();
       sendTo(ws, {
