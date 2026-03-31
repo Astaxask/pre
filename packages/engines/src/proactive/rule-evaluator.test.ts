@@ -58,7 +58,7 @@ function makeDeps() {
       recentByDomain: vi.fn().mockResolvedValue([]),
       byTimeRange: vi.fn().mockResolvedValue([]),
       goals: vi.fn().mockResolvedValue([]),
-      triggerLog: vi.fn(),
+      triggerLog: vi.fn().mockResolvedValue([]),
       byGoalId: vi.fn().mockResolvedValue([]).mockResolvedValue([]),
     },
     writeTriggerLog: vi.fn(),

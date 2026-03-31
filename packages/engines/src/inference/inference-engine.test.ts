@@ -3,6 +3,17 @@ import type { LifeDomain, LifeEvent } from '@pre/shared';
 import { run, getInsights, type InferenceEngineDeps } from './inference-engine.js';
 import type { DetectedPattern } from '../types.js';
 
+// Mock callModel so tests don't require a running Ollama instance
+vi.mock('@pre/models', () => ({
+  callModel: vi.fn().mockResolvedValue({
+    content: 'A pattern was detected across life domains.',
+    model: 'mock',
+    tokensUsed: 50,
+    costUsd: 0,
+  }),
+  configureRouter: vi.fn(),
+}));
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
