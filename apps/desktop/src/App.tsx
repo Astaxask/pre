@@ -61,19 +61,17 @@ type ObserverInfo = {
 };
 
 // ---------------------------------------------------------------------------
-// Thought memory — persists across cycles, prevents repetition
+// Persistent thought memory — survives across app restarts
 // ---------------------------------------------------------------------------
 
-/** Tracks which template keys have been shown. Only update, never re-add. */
+/** In-memory cache of shown templates for fast dedup within a session */
 const shownTemplates = new Map<string, { text: string; timestamp: number; count: number }>();
 
 function shouldShow(key: string, newText: string): boolean {
   const prev = shownTemplates.get(key);
   if (!prev) return true;
-  // Only re-show if it's been at least 5 minutes AND the content meaningfully changed
   const timeDiff = Date.now() - prev.timestamp;
-  if (timeDiff < 300_000) return false;
-  // If the text is essentially the same (ignoring numbers), skip
+  if (timeDiff < 300_000) return false; // 5min cooldown
   const normalize = (s: string) => s.replace(/\d+/g, '#');
   if (normalize(newText) === normalize(prev.text)) return false;
   return true;
@@ -82,6 +80,82 @@ function shouldShow(key: string, newText: string): boolean {
 function markShown(key: string, text: string) {
   const prev = shownTemplates.get(key);
   shownTemplates.set(key, { text, timestamp: Date.now(), count: (prev?.count ?? 0) + 1 });
+}
+
+/** Save thoughts to SQLite for persistence across restarts */
+async function persistThoughts(thoughts: Thought[]) {
+  if (thoughts.length === 0) return;
+  const payload = thoughts.map((t) => ({
+    id: t.id,
+    text: t.text,
+    category: t.category,
+    importance: t.importance,
+    source: t.source,
+    templateKey: t.templateKey,
+  }));
+  await tauriInvoke('save_thoughts', { thoughts: payload });
+}
+
+/** Load persisted thoughts from SQLite */
+async function loadPersistedThoughts(): Promise<Thought[]> {
+  const raw = await tauriInvoke<Array<{
+    id: string; text: string; category: string; importance: string;
+    source: string; templateKey: string; timestamp: number; updatedAt: number;
+  }>>('load_thoughts', { limit: 40 });
+
+  if (!raw || raw.length === 0) return [];
+
+  return raw.map((t) => ({
+    id: t.id,
+    text: t.text,
+    category: (t.category as Thought['category']) || 'reflection',
+    importance: (t.importance as Thought['importance']) || 'ambient',
+    timestamp: t.timestamp,
+    source: (t.source as Thought['source']) || 'local',
+    templateKey: t.templateKey,
+    isNew: false, // Already seen
+  }));
+}
+
+/** Save a core memory block (the AI's evolving understanding) */
+async function saveCoreMemory(label: string, value: string) {
+  await tauriInvoke('save_core_memory', { label, value });
+}
+
+/** Load all core memory blocks */
+async function loadCoreMemory(): Promise<Record<string, string>> {
+  const raw = await tauriInvoke<Array<{ label: string; value: string }>>('load_core_memory');
+  if (!raw) return {};
+  const result: Record<string, string> = {};
+  for (const block of raw) {
+    result[block.label] = block.value;
+  }
+  return result;
+}
+
+/** Build a user profile summary from observations (for core memory) */
+async function buildUserProfile(obs: RawObservation[]): Promise<string> {
+  const apps = obs.filter((o) => o.event_type === 'app-session');
+  const appStats: Record<string, number> = {};
+  for (const s of apps) {
+    const name = (s.payload.appName as string) || '';
+    if (!name || name === 'WindowManager' || name === 'Finder') continue;
+    appStats[name] = (appStats[name] || 0) + ((s.payload.sessionDurationSeconds as number) || 0);
+  }
+  const topApps = Object.entries(appStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const browsing = obs.filter((o) => o.event_type === 'browsing-session');
+  const sites = [...new Set(browsing.map((b) => (b.payload.domainVisited as string) || ''))].filter(Boolean).slice(0, 5);
+
+  const lines = [];
+  if (topApps.length > 0) {
+    lines.push(`Most used apps: ${topApps.map(([n, s]) => `${n} (${Math.round(s / 60)}m)`).join(', ')}`);
+  }
+  if (sites.length > 0) {
+    lines.push(`Frequent sites: ${sites.join(', ')}`);
+  }
+  const hour = new Date().getHours();
+  lines.push(`Active hours: typically ${hour >= 22 || hour < 6 ? 'late night worker' : hour < 12 ? 'morning person' : 'afternoon/evening'}`);
+  return lines.join('. ');
 }
 
 // ---------------------------------------------------------------------------
@@ -447,9 +521,22 @@ export function App() {
       const local = await analyzeLife();
       mergeThoughts(local);
 
-      // Phase 2: AI (fire and forget)
+      // Persist local thoughts immediately
+      if (local.length > 0) {
+        persistThoughts(local).catch(() => {});
+      }
+
+      // Phase 2: Update core memory (user profile)
+      buildUserProfile(rawObs).then((profile) => {
+        if (profile) saveCoreMemory('user_profile', profile).catch(() => {});
+      });
+
+      // Phase 3: AI (fire and forget)
       callAI().then((ai) => {
-        if (ai.length > 0) mergeThoughts(ai);
+        if (ai.length > 0) {
+          mergeThoughts(ai);
+          persistThoughts(ai).catch(() => {});
+        }
       }).catch(() => {}).finally(() => {
         thinkingRef.current = false;
         setIsThinking(false);
@@ -470,7 +557,18 @@ export function App() {
       if (obs) setObservers(obs);
     });
 
-    // First think
+    // Load persisted thoughts from previous sessions FIRST
+    loadPersistedThoughts().then((persisted) => {
+      if (persisted.length > 0) {
+        setThoughts(persisted);
+        // Populate shownTemplates cache to prevent re-generation
+        for (const t of persisted) {
+          shownTemplates.set(t.templateKey, { text: t.text, timestamp: t.timestamp, count: 1 });
+        }
+      }
+    });
+
+    // Then start fresh thinking (will add new thoughts on top)
     think();
 
     const setupTimer = setTimeout(() => {

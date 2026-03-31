@@ -143,50 +143,241 @@ async fn toggle_observer(
 }
 
 // ---------------------------------------------------------------------------
+// Database helpers — persistent memory layer
+// ---------------------------------------------------------------------------
+
+fn pre_db_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(&home).join(".pre").join("observer-buffer.db")
+}
+
+fn open_db_rw() -> Result<rusqlite::Connection, String> {
+    let db_path = pre_db_path();
+    if !db_path.exists() {
+        return Err("Buffer DB not found".to_string());
+    }
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("Failed to open DB: {}", e))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+fn open_db_ro() -> Result<rusqlite::Connection, String> {
+    let db_path = pre_db_path();
+    if !db_path.exists() {
+        return Err("Buffer DB not found".to_string());
+    }
+    rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).map_err(|e| format!("Failed to open DB: {}", e))
+}
+
+/// Initialize memory tables (thoughts + core_memory)
+fn init_memory_tables(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS thoughts (
+            id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'reflection',
+            importance TEXT NOT NULL DEFAULT 'ambient',
+            source TEXT NOT NULL DEFAULT 'local',
+            template_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            expired INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_thoughts_created ON thoughts(created_at);
+        CREATE INDEX IF NOT EXISTS idx_thoughts_key ON thoughts(template_key);
+        CREATE INDEX IF NOT EXISTS idx_thoughts_expired ON thoughts(expired);
+
+        CREATE TABLE IF NOT EXISTS core_memory (
+            label TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1
+        );
+    ").map_err(|e| format!("Failed to init memory tables: {}", e))
+}
+
+// ---------------------------------------------------------------------------
 // Tauri commands: read local observation buffer (works without gateway)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LocalObservation {
-    id: i64,
-    event_json: String,
-    created_at: i64,
-    sent: bool,
-}
-
 #[tauri::command]
 fn get_recent_observations(limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let db_path = std::path::PathBuf::from(&home)
-        .join(".pre")
-        .join("observer-buffer.db");
-
-    if !db_path.exists() {
-        return Ok(vec![]);
-    }
-
-    let conn = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| format!("Failed to open buffer DB: {}", e))?;
+    let conn = match open_db_ro() {
+        Ok(c) => c,
+        Err(_) => return Ok(vec![]),
+    };
 
     let max = limit.unwrap_or(100);
     let mut stmt = conn
-        .prepare(
-            "SELECT event_json, created_at FROM event_buffer ORDER BY created_at DESC LIMIT ?1",
-        )
+        .prepare("SELECT event_json FROM event_buffer ORDER BY created_at DESC LIMIT ?1")
         .map_err(|e| e.to_string())?;
 
     let results: Vec<serde_json::Value> = stmt
         .query_map([max], |row| {
             let json_str: String = row.get(0)?;
-            let created_at: i64 = row.get(1)?;
-            Ok((json_str, created_at))
+            Ok(json_str)
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
-        .filter_map(|(json_str, _)| serde_json::from_str(&json_str).ok())
+        .filter_map(|json_str| serde_json::from_str(&json_str).ok())
+        .collect();
+
+    Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands: persistent thought memory
+// ---------------------------------------------------------------------------
+
+/// Save thoughts to persistent storage. Updates existing by template_key.
+#[tauri::command]
+fn save_thoughts(thoughts: Vec<serde_json::Value>) -> Result<(), String> {
+    let conn = open_db_rw()?;
+    init_memory_tables(&conn)?;
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    for t in &thoughts {
+        let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let text = t.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let category = t.get("category").and_then(|v| v.as_str()).unwrap_or("reflection");
+        let importance = t.get("importance").and_then(|v| v.as_str()).unwrap_or("ambient");
+        let source = t.get("source").and_then(|v| v.as_str()).unwrap_or("local");
+        let template_key = t.get("templateKey").and_then(|v| v.as_str()).unwrap_or(id);
+
+        if text.is_empty() { continue; }
+
+        // Upsert: if template_key exists, update text; else insert new
+        conn.execute(
+            "INSERT INTO thoughts (id, text, category, importance, source, template_key, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET text=?2, importance=?4, updated_at=?7",
+            rusqlite::params![id, text, category, importance, source, template_key, now],
+        ).map_err(|e| format!("Failed to save thought: {}", e))?;
+    }
+
+    // Expire old thoughts (older than 7 days)
+    let week_ago = now - 7 * 24 * 60 * 60 * 1000;
+    conn.execute(
+        "UPDATE thoughts SET expired = 1 WHERE created_at < ?1 AND expired = 0",
+        [week_ago],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Load persisted thoughts (non-expired, most recent first)
+#[tauri::command]
+fn load_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
+    let conn = match open_db_ro() {
+        Ok(c) => c,
+        Err(_) => return Ok(vec![]),
+    };
+
+    // Check if thoughts table exists
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='thoughts'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !table_exists {
+        return Ok(vec![]);
+    }
+
+    let max = limit.unwrap_or(50);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, text, category, importance, source, template_key, created_at, updated_at
+             FROM thoughts WHERE expired = 0 ORDER BY updated_at DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let results: Vec<serde_json::Value> = stmt
+        .query_map([max], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "text": row.get::<_, String>(1)?,
+                "category": row.get::<_, String>(2)?,
+                "importance": row.get::<_, String>(3)?,
+                "source": row.get::<_, String>(4)?,
+                "templateKey": row.get::<_, String>(5)?,
+                "timestamp": row.get::<_, i64>(6)?,
+                "updatedAt": row.get::<_, i64>(7)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands: core memory (AI's persistent understanding)
+// ---------------------------------------------------------------------------
+
+/// Save or update a core memory block
+#[tauri::command]
+fn save_core_memory(label: String, value: String) -> Result<(), String> {
+    let conn = open_db_rw()?;
+    init_memory_tables(&conn)?;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    conn.execute(
+        "INSERT INTO core_memory (label, value, updated_at, version)
+         VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(label) DO UPDATE SET value=?2, updated_at=?3, version=version+1",
+        rusqlite::params![label, value, now],
+    ).map_err(|e| format!("Failed to save core memory: {}", e))?;
+
+    Ok(())
+}
+
+/// Load all core memory blocks
+#[tauri::command]
+fn load_core_memory() -> Result<Vec<serde_json::Value>, String> {
+    let conn = match open_db_ro() {
+        Ok(c) => c,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='core_memory'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !table_exists {
+        return Ok(vec![]);
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT label, value, updated_at, version FROM core_memory ORDER BY label")
+        .map_err(|e| e.to_string())?;
+
+    let results: Vec<serde_json::Value> = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "label": row.get::<_, String>(0)?,
+                "value": row.get::<_, String>(1)?,
+                "updatedAt": row.get::<_, i64>(2)?,
+                "version": row.get::<_, i64>(3)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
         .collect();
 
     Ok(results)
@@ -299,11 +490,11 @@ async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Valu
         return Ok(vec![]);
     }
 
-    // 2. Build COMPACT context — only 15 obs, short lines
+    // 2. Build COMPACT context — only 12 obs, short lines
     let now = chrono::Utc::now().timestamp_millis();
     let mut context_lines = Vec::new();
 
-    for obs in observations.iter().take(15) {
+    for obs in observations.iter().take(12) {
         let event_type = obs.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
         let timestamp = obs.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
         let payload = obs.get("payload");
@@ -331,33 +522,64 @@ async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Valu
     let h = chrono::Local::now().hour();
     let time_ctx = if h < 6 { "late night" } else if h < 12 { "morning" } else if h < 17 { "afternoon" } else if h < 21 { "evening" } else { "night" };
 
-    // 3. Compact prompt — minimal tokens for fast generation
-    let prompt = format!(
-r#"You are a second brain observing someone's digital life. It's {} {}.
+    // 3. Load memory context — previous thoughts + core memory
+    let mut memory_section = String::new();
 
-Activity:
+    // Core memory (the AI's persistent understanding)
+    let core = load_core_memory().unwrap_or_default();
+    if !core.is_empty() {
+        memory_section.push_str("What I know about you:\n");
+        for block in core.iter().take(5) {
+            let label = block.get("label").and_then(|v| v.as_str()).unwrap_or("");
+            let value = block.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            if !value.is_empty() {
+                memory_section.push_str(&format!("- {}: {}\n", label, value));
+            }
+        }
+        memory_section.push('\n');
+    }
+
+    // Recent thoughts (what I was thinking before)
+    let prev_thoughts = load_thoughts(Some(5)).unwrap_or_default();
+    if !prev_thoughts.is_empty() {
+        memory_section.push_str("My recent thoughts:\n");
+        for t in prev_thoughts.iter().take(5) {
+            let text = t.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                let short = if text.len() > 80 { &text[..80] } else { text };
+                memory_section.push_str(&format!("- {}\n", short));
+            }
+        }
+        memory_section.push('\n');
+    }
+
+    // 4. Build prompt with memory context
+    let prompt = format!(
+r#"You are PRE, a personal second brain. It's {} {}.
+
+{}Current activity:
 {}
 
-Write 2-3 short thoughts about what you see. Be warm, insightful, never preachy. Write as "I notice..." or "You've been...". Each thought is 1-2 sentences.
+Write 2-3 NEW thoughts. Don't repeat previous thoughts. Be warm, insightful, surprising. Think about what their behavior means for their life — goals, health, money, time, relationships. Give actionable advice when you can.
 
 Reply ONLY with JSON:
 [{{"text":"...","category":"reflection","importance":"notable"}}]
-
-Categories: reflection, insight, pattern, question, prediction, nudge
+Categories: reflection, insight, pattern, question, prediction, nudge, plan, memory
 Importance: ambient, notable, important"#,
         chrono::Local::now().format("%H:%M"),
         time_ctx,
+        memory_section,
         context_lines.join("\n")
     );
 
-    // 4. Call Ollama with tight timeout
+    // 5. Call Ollama
     let client = reqwest::Client::new();
     let ollama_request = serde_json::json!({
         "model": "llama3.1:8b",
         "prompt": prompt,
         "stream": false,
         "options": {
-            "temperature": 0.8,
+            "temperature": 0.85,
             "top_p": 0.9,
             "num_predict": 400,
             "num_ctx": 2048,
@@ -367,7 +589,7 @@ Importance: ambient, notable, important"#,
     let response = client
         .post("http://127.0.0.1:11434/api/generate")
         .json(&ollama_request)
-        .timeout(std::time::Duration::from_secs(45))
+        .timeout(std::time::Duration::from_secs(90))
         .send()
         .await
         .map_err(|e| format!("Ollama request failed: {}", e))?;
@@ -479,6 +701,10 @@ pub fn run() {
             get_thinking_stream,
             generate_ai_thoughts,
             check_ai_status,
+            save_thoughts,
+            load_thoughts,
+            save_core_memory,
+            load_core_memory,
         ])
         .setup(|app| {
             // ── Tray icon ────────────────────────────────────────────
