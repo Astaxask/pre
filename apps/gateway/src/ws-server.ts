@@ -136,6 +136,12 @@ const surfaceMessageSchema = z.discriminatedUnion('type', [
     durationHours: z.number().min(1).max(168),
     alert: z.unknown(),
   }),
+  z.object({
+    type: z.literal('ingest-events'),
+    payload: z.object({
+      events: z.array(z.unknown()),
+    }),
+  }),
 ]);
 
 type WsServerDeps = {
@@ -514,6 +520,36 @@ async function handleMessage(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         sendTo(ws, { type: 'error', error: `Log event failed: ${message}` });
+      }
+      break;
+    }
+
+    case 'ingest-events': {
+      // Batch ingestion from OS-level observers (desktop Tauri app)
+      try {
+        const events = (msg.payload as { events: unknown[] }).events;
+        let ingested = 0;
+        let failed = 0;
+        for (const raw of events) {
+          try {
+            const event = lifeEventSchema.parse(raw);
+            const writeResult = await writer.event(event);
+            if (isErr(writeResult)) {
+              failed++;
+            } else {
+              ingested++;
+            }
+          } catch {
+            failed++;
+          }
+        }
+        sendTo(ws, {
+          type: 'ingest-result',
+          payload: { ingested, failed, total: events.length },
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendTo(ws, { type: 'error', error: `Ingest failed: ${message}` });
       }
       break;
     }

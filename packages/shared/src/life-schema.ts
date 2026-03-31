@@ -33,6 +33,7 @@ export const privacyLevelSchema = z.enum([
 ]);
 
 export type DataSource =
+  // API-based adapters
   | 'plaid'
   | 'healthkit'
   | 'google-fit'
@@ -41,10 +42,25 @@ export type DataSource =
   | 'garmin'
   | 'google-calendar'
   | 'gmail'
+  // OS-level observers (macOS)
+  | 'macos-app-usage'
+  | 'macos-browser'
+  | 'macos-screen'
+  | 'macos-messages'
+  | 'macos-calendar'
+  | 'macos-location'
+  | 'macos-music'
+  // OS-level observers (iOS)
+  | 'ios-healthkit'
+  | 'ios-screentime'
+  | 'ios-motion'
+  | 'ios-location'
+  // System
   | 'manual'
   | 'inferred';
 
 export const dataSourceSchema = z.enum([
+  // API-based adapters
   'plaid',
   'healthkit',
   'google-fit',
@@ -53,6 +69,20 @@ export const dataSourceSchema = z.enum([
   'garmin',
   'google-calendar',
   'gmail',
+  // OS-level observers (macOS)
+  'macos-app-usage',
+  'macos-browser',
+  'macos-screen',
+  'macos-messages',
+  'macos-calendar',
+  'macos-location',
+  'macos-music',
+  // OS-level observers (iOS)
+  'ios-healthkit',
+  'ios-screentime',
+  'ios-motion',
+  'ios-location',
+  // System
   'manual',
   'inferred',
 ]);
@@ -71,6 +101,7 @@ export type BodyPayload = {
     | 'recovery-score'
     | 'biometric'
     | 'symptom'
+    | 'motion-activity'
     | 'manual-log';
 
   // Sleep
@@ -102,6 +133,9 @@ export type BodyPayload = {
   symptomDescription?: string;
   severity?: number;
 
+  // Motion activity (OS observer: CoreMotion)
+  activityType?: 'stationary' | 'walking' | 'running' | 'cycling' | 'automotive';
+
   // Manual log
   contentHash?: string;
   wordCount?: number;
@@ -117,6 +151,7 @@ export const bodyPayloadSchema = z.object({
     'recovery-score',
     'biometric',
     'symptom',
+    'motion-activity',
     'manual-log',
   ]),
   sleepDuration: z.number().optional(),
@@ -136,6 +171,7 @@ export const bodyPayloadSchema = z.object({
   unit: z.string().optional(),
   symptomDescription: z.string().optional(),
   severity: z.number().optional(),
+  activityType: z.enum(['stationary', 'walking', 'running', 'cycling', 'automotive']).optional(),
   contentHash: z.string().optional(),
   wordCount: z.number().optional(),
 });
@@ -210,7 +246,7 @@ export type PeoplePayload = {
     | 'manual-log';
 
   // Communication
-  channel?: 'email' | 'sms' | 'slack' | 'whatsapp' | 'other';
+  channel?: 'email' | 'sms' | 'slack' | 'whatsapp' | 'imessage' | 'other';
   direction?: 'sent' | 'received';
   contactId?: string;
 
@@ -222,6 +258,11 @@ export type PeoplePayload = {
     | 'reconnect';
   daysSinceLastContact?: number;
 
+  // Message metadata (OS observer: iMessage, etc.)
+  messageCount?: number;
+  isGroup?: boolean;
+  participantCount?: number;
+
   // Manual log
   contentHash?: string;
   wordCount?: number;
@@ -231,7 +272,7 @@ export const peoplePayloadSchema = z.object({
   domain: z.literal('people'),
   subtype: z.enum(['communication', 'meeting', 'relationship-signal', 'manual-log']),
   channel: z
-    .enum(['email', 'sms', 'slack', 'whatsapp', 'other'])
+    .enum(['email', 'sms', 'slack', 'whatsapp', 'imessage', 'other'])
     .optional(),
   direction: z.enum(['sent', 'received']).optional(),
   contactId: z.string().optional(),
@@ -244,6 +285,9 @@ export const peoplePayloadSchema = z.object({
     ])
     .optional(),
   daysSinceLastContact: z.number().optional(),
+  messageCount: z.number().optional(),
+  isGroup: z.boolean().optional(),
+  participantCount: z.number().optional(),
   contentHash: z.string().optional(),
   wordCount: z.number().optional(),
 });
@@ -255,6 +299,8 @@ export type TimePayload = {
     | 'time-block'
     | 'commitment'
     | 'time-audit'
+    | 'app-session'
+    | 'screen-session'
     | 'manual-log';
 
   // Calendar event
@@ -271,6 +317,15 @@ export type TimePayload = {
   commitmentLabel?: string;
   weeklyHours?: number;
 
+  // App session (OS observer: active app tracking)
+  appBundleId?: string;
+  appName?: string;
+  sessionDurationSeconds?: number;
+
+  // Screen session (OS observer: active/idle/locked)
+  screenState?: 'active' | 'idle' | 'locked';
+  idleDurationSeconds?: number;
+
   // Manual log
   contentHash?: string;
   wordCount?: number;
@@ -283,6 +338,8 @@ export const timePayloadSchema = z.object({
     'time-block',
     'commitment',
     'time-audit',
+    'app-session',
+    'screen-session',
     'manual-log',
   ]),
   title: z.string().optional(),
@@ -297,6 +354,11 @@ export const timePayloadSchema = z.object({
     .optional(),
   commitmentLabel: z.string().optional(),
   weeklyHours: z.number().optional(),
+  appBundleId: z.string().optional(),
+  appName: z.string().optional(),
+  sessionDurationSeconds: z.number().optional(),
+  screenState: z.enum(['active', 'idle', 'locked']).optional(),
+  idleDurationSeconds: z.number().optional(),
   contentHash: z.string().optional(),
   wordCount: z.number().optional(),
 });
@@ -309,6 +371,8 @@ export type MindPayload = {
     | 'mood-log'
     | 'learning-session'
     | 'reflection'
+    | 'browsing-session'
+    | 'now-playing'
     | 'manual-log';
 
   // Goal
@@ -332,6 +396,16 @@ export type MindPayload = {
   durationMinutes?: number;
   medium?: 'book' | 'article' | 'course' | 'video' | 'practice' | 'other';
 
+  // Browsing session (OS observer: browser history, domain only — never full URLs)
+  domainVisited?: string;
+  visitCount?: number;
+  totalDurationSeconds?: number;
+
+  // Now playing (OS observer: music metadata)
+  trackTitle?: string;
+  artistName?: string;
+  albumName?: string;
+
   // Reflection
   contentHash?: string;
   wordCount?: number;
@@ -345,6 +419,8 @@ export const mindPayloadSchema = z.object({
     'mood-log',
     'learning-session',
     'reflection',
+    'browsing-session',
+    'now-playing',
     'manual-log',
   ]),
   goalId: z.string().optional(),
@@ -364,6 +440,12 @@ export const mindPayloadSchema = z.object({
   medium: z
     .enum(['book', 'article', 'course', 'video', 'practice', 'other'])
     .optional(),
+  domainVisited: z.string().optional(),
+  visitCount: z.number().optional(),
+  totalDurationSeconds: z.number().optional(),
+  trackTitle: z.string().optional(),
+  artistName: z.string().optional(),
+  albumName: z.string().optional(),
   contentHash: z.string().optional(),
   wordCount: z.number().optional(),
 });

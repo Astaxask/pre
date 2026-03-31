@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Location usage description (required by macOS for CoreLocation) -->
+    <key>NSLocationUsageDescription</key>
+    <string>PRE uses your approximate location to understand context (home, work, commuting) — no GPS coordinates are stored.</string>
+
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>PRE uses your approximate location to understand context (home, work, commuting) — no GPS coordinates are stored.</string>
+
+    <!-- Calendar usage description -->
+    <key>NSCalendarsUsageDescription</key>
+    <string>PRE reads your calendar events to track time allocation and detect scheduling patterns.</string>
+
+    <!-- Automation (AppleScript for Music/Spotify) -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>PRE checks what music is playing to understand your listening patterns.</string>
+
+    <!-- Full Disk Access notice (displayed in System Settings) -->
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>PRE reads browser history and message metadata to build your personal model. No content is ever read — only metadata.</string>
+
+    <!-- Background modes -->
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

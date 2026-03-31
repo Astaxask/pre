@@ -40,10 +40,18 @@ describe('privacyLevelSchema', () => {
 });
 
 describe('dataSourceSchema', () => {
-  it('accepts all data sources', () => {
+  it('accepts all data sources including OS-level observers', () => {
     const sources = [
+      // API-based
       'plaid', 'healthkit', 'google-fit', 'oura', 'whoop',
-      'garmin', 'google-calendar', 'gmail', 'manual', 'inferred',
+      'garmin', 'google-calendar', 'gmail',
+      // macOS observers
+      'macos-app-usage', 'macos-browser', 'macos-screen',
+      'macos-messages', 'macos-calendar', 'macos-location', 'macos-music',
+      // iOS observers
+      'ios-healthkit', 'ios-screentime', 'ios-motion', 'ios-location',
+      // System
+      'manual', 'inferred',
     ];
     for (const s of sources) {
       expect(dataSourceSchema.parse(s)).toBe(s);
@@ -142,6 +150,73 @@ describe('domainPayloadSchema', () => {
     expect(() =>
       domainPayloadSchema.parse({ domain: 'invalid', subtype: 'sleep' }),
     ).toThrow();
+  });
+
+  it('parses body motion-activity payload (OS observer)', () => {
+    const result = bodyPayloadSchema.parse({
+      domain: 'body',
+      subtype: 'motion-activity',
+      activityType: 'walking',
+    });
+    expect(result.activityType).toBe('walking');
+  });
+
+  it('parses people iMessage payload (OS observer)', () => {
+    const result = peoplePayloadSchema.parse({
+      domain: 'people',
+      subtype: 'communication',
+      channel: 'imessage',
+      messageCount: 12,
+      isGroup: false,
+      participantCount: 2,
+    });
+    expect(result.channel).toBe('imessage');
+    expect(result.messageCount).toBe(12);
+  });
+
+  it('parses time app-session payload (OS observer)', () => {
+    const result = timePayloadSchema.parse({
+      domain: 'time',
+      subtype: 'app-session',
+      appBundleId: 'com.apple.Safari',
+      appName: 'Safari',
+      sessionDurationSeconds: 1800,
+    });
+    expect(result.appBundleId).toBe('com.apple.Safari');
+  });
+
+  it('parses time screen-session payload (OS observer)', () => {
+    const result = timePayloadSchema.parse({
+      domain: 'time',
+      subtype: 'screen-session',
+      screenState: 'idle',
+      idleDurationSeconds: 300,
+    });
+    expect(result.screenState).toBe('idle');
+  });
+
+  it('parses mind browsing-session payload (OS observer)', () => {
+    const result = mindPayloadSchema.parse({
+      domain: 'mind',
+      subtype: 'browsing-session',
+      domainVisited: 'github.com',
+      visitCount: 5,
+      totalDurationSeconds: 600,
+    });
+    expect(result.domainVisited).toBe('github.com');
+    expect(result.visitCount).toBe(5);
+  });
+
+  it('parses mind now-playing payload (OS observer)', () => {
+    const result = mindPayloadSchema.parse({
+      domain: 'mind',
+      subtype: 'now-playing',
+      trackTitle: 'Bohemian Rhapsody',
+      artistName: 'Queen',
+      albumName: 'A Night at the Opera',
+    });
+    expect(result.trackTitle).toBe('Bohemian Rhapsody');
+    expect(result.artistName).toBe('Queen');
   });
 });
 

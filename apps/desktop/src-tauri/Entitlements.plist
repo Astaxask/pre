@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox (required for Mac App Store; disable for direct distribution) -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- File access: needed for reading browser history, iMessage DB, Calendar DB -->
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+
+    <!-- Network: connect to local gateway WebSocket -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Location services -->
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+
+    <!-- Calendar access (EventKit) -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+
+    <!-- Automation (for Music/Spotify AppleScript) -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

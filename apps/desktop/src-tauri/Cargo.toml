@@ -24,3 +24,28 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Async runtime for observers
+tokio = { version = "1", features = ["full"] }
+
+# SQLite for local event buffer (offline resilience)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# WebSocket client to push events to gateway
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# macOS-specific: Objective-C bindings for NSWorkspace, CoreLocation, etc.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSRunLoop", "NSDate", "NSDictionary", "NSNotification", "NSThread", "NSObject"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
+block2 = "0.6"
+
+# Unique IDs and URL parsing
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+sha2 = "0.10"
+async-trait = "0.1"
+

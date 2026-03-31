@@ -1,8 +1,23 @@
-use std::sync::Mutex;
+mod observers;
+
+use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{
     Manager,
     tray::TrayIconBuilder,
+};
+use tokio::sync::mpsc;
+
+use observers::{
+    ObserverManager, ObserverStatus,
+    app_usage::AppUsageObserver,
+    browser_history::BrowserHistoryObserver,
+    calendar::CalendarObserver,
+    gateway_client::GatewayClient,
+    imessage::IMessageObserver,
+    location::LocationObserver,
+    music::MusicObserver,
+    screen_activity::ScreenActivityObserver,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,11 +39,15 @@ impl Default for TrayState {
 }
 
 // ---------------------------------------------------------------------------
-// Managed state — holds current TrayState in a Mutex
+// Managed state
 // ---------------------------------------------------------------------------
 
 struct ManagedTrayState {
     current: Mutex<TrayState>,
+}
+
+struct ManagedObserverManager {
+    manager: Arc<tokio::sync::Mutex<ObserverManager>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +80,7 @@ fn tooltip_for_state(state: TrayState) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri command: set_tray_state
+// Tauri commands: tray state
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -70,15 +89,13 @@ fn set_tray_state(
     state: TrayState,
     managed: tauri::State<'_, ManagedTrayState>,
 ) -> Result<(), String> {
-    // Update managed state
     let mut current = managed.current.lock().map_err(|e| e.to_string())?;
     if *current == state {
-        return Ok(()); // No change needed
+        return Ok(());
     }
     *current = state;
-    drop(current); // Release the lock before doing I/O
+    drop(current);
 
-    // Get the tray handle and update icon + tooltip
     let tray = app.tray_by_id(TRAY_ID).ok_or("Tray icon not found")?;
 
     let png_bytes = icon_for_state(state);
@@ -94,16 +111,34 @@ fn set_tray_state(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tauri command: get_tray_state (for frontend to query current state)
-// ---------------------------------------------------------------------------
-
 #[tauri::command]
 fn get_tray_state(
     managed: tauri::State<'_, ManagedTrayState>,
 ) -> Result<TrayState, String> {
     let current = managed.current.lock().map_err(|e| e.to_string())?;
     Ok(*current)
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands: observer management
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_observer_status(
+    managed: tauri::State<'_, ManagedObserverManager>,
+) -> Result<Vec<ObserverStatus>, String> {
+    let mgr = managed.manager.lock().await;
+    Ok(mgr.get_statuses().await)
+}
+
+#[tauri::command]
+async fn toggle_observer(
+    name: String,
+    enabled: bool,
+    managed: tauri::State<'_, ManagedObserverManager>,
+) -> Result<bool, String> {
+    let mgr = managed.manager.lock().await;
+    Ok(mgr.set_enabled(&name, enabled).await)
 }
 
 // ---------------------------------------------------------------------------
@@ -117,15 +152,20 @@ pub fn run() {
         .manage(ManagedTrayState {
             current: Mutex::new(TrayState::default()),
         })
-        .invoke_handler(tauri::generate_handler![set_tray_state, get_tray_state])
+        .invoke_handler(tauri::generate_handler![
+            set_tray_state,
+            get_tray_state,
+            get_observer_status,
+            toggle_observer,
+        ])
         .setup(|app| {
-            // Build the tray icon with the idle icon and a known ID
+            // ── Tray icon ────────────────────────────────────────────
             let idle_image = tauri::image::Image::from_bytes(ICON_IDLE)
                 .expect("Failed to decode idle tray icon");
 
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(idle_image)
-                .icon_as_template(true) // macOS: renders as template (adapts to light/dark menu bar)
+                .icon_as_template(true)
                 .tooltip(tooltip_for_state(TrayState::Idle))
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { .. } = event {
@@ -142,10 +182,68 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Hide window initially (menu bar apps start hidden)
+            // Hide window initially (menu bar app)
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.hide();
             }
+
+            // ── Observer infrastructure ──────────────────────────────
+            // Channel: observers → gateway client
+            let (event_tx, event_rx) = mpsc::channel(1024);
+
+            // Create observer manager and register all observers
+            let mut manager = ObserverManager::new(event_tx);
+
+            // We need a tokio runtime to register (for the status mutex init).
+            // Tauri 2 runs setup synchronously, so we spawn the async work.
+            let app_handle = app.handle().clone();
+
+            tauri::async_runtime::spawn(async move {
+                // Register all observers
+                manager.register(Arc::new(AppUsageObserver::new()));
+                manager.register(Arc::new(ScreenActivityObserver::new()));
+                manager.register(Arc::new(BrowserHistoryObserver::new()));
+                manager.register(Arc::new(IMessageObserver::new()));
+                manager.register(Arc::new(CalendarObserver::new()));
+                manager.register(Arc::new(LocationObserver::new()));
+                manager.register(Arc::new(MusicObserver::new()));
+
+                // Start all enabled observers
+                manager.start_all();
+
+                let statuses = manager.get_statuses().await;
+                let active = statuses.iter().filter(|s| s.enabled).count();
+                let total = statuses.len();
+                log::info!(
+                    "Observer manager started: {}/{} observers active",
+                    active,
+                    total
+                );
+                for s in &statuses {
+                    log::info!(
+                        "  {} {} (available: {})",
+                        if s.enabled { "✓" } else { "✗" },
+                        s.name,
+                        s.available
+                    );
+                }
+
+                // Store manager in Tauri state for command access
+                app_handle.manage(ManagedObserverManager {
+                    manager: Arc::new(tokio::sync::Mutex::new(manager)),
+                });
+
+                // Start gateway client (consumes event_rx)
+                match GatewayClient::new(event_rx) {
+                    Ok(client) => {
+                        log::info!("Gateway client started, buffering events to ~/.pre/observer-buffer.db");
+                        client.run().await;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start gateway client: {}", e);
+                    }
+                }
+            });
 
             Ok(())
         })
