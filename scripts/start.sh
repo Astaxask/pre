@@ -47,7 +47,7 @@ fi
 # 5. Run database migration
 echo "Running database migrations..."
 cd "$PROJECT_ROOT"
-pnpm --filter @pre/memory db:migrate --silent
+pnpm --filter @pre/memory db:migrate
 echo "✓ Database ready"
 
 # 6. Start gateway (foreground — user sees logs)
