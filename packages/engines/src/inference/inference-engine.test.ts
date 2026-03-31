@@ -6,7 +6,7 @@ import type { DetectedPattern } from '../types.js';
 // Mock callModel so tests don't require a running Ollama instance
 vi.mock('@pre/models', () => ({
   callModel: vi.fn().mockResolvedValue({
-    content: 'A pattern was detected across life domains.',
+    content: '{"insights": []}',
     model: 'mock',
     tokensUsed: 50,
     costUsd: 0,
@@ -74,11 +74,11 @@ function makeMockDeps(overrides: Partial<InferenceEngineDeps> = {}): InferenceEn
 
 describe('InferenceEngine', () => {
   describe('run()', () => {
-    it('should return early with 0 insights when < 50 events', async () => {
+    it('should return early with 0 insights when < 20 events', async () => {
       const deps = makeMockDeps({
         reader: {
           ...makeMockDeps().reader,
-          recentByDomain: vi.fn().mockResolvedValue(makeEvents(5)),
+          recentByDomain: vi.fn().mockResolvedValue(makeEvents(2)),
         },
       });
 

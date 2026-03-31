@@ -8,6 +8,7 @@ import type {
   InferenceResult,
   DetectedPattern,
 } from '../types.js';
+import { buildLifeSnapshot, compose as composerCompose } from './composer.js';
 
 // ---------------------------------------------------------------------------
 // Types for dependencies (injected at construction)
@@ -64,7 +65,7 @@ function publishInsight(insight: LifeInsight): void {
 const ALL_DOMAINS: LifeDomain[] = ['body', 'money', 'people', 'time', 'mind', 'world'];
 
 // ---------------------------------------------------------------------------
-// Payload extraction — numeric values only for pattern detection
+// Payload extraction — numeric values only for statistical pattern detection
 // ---------------------------------------------------------------------------
 
 function extractNumericFields(event: LifeEvent): Record<string, unknown> {
@@ -87,17 +88,21 @@ function extractNumericFields(event: LifeEvent): Record<string, unknown> {
     }
   } else if (p.domain === 'time') {
     if ('durationMinutes' in p && p.durationMinutes != null) base['durationMinutes'] = p.durationMinutes;
+    if ('sessionDurationSeconds' in p && p.sessionDurationSeconds != null) base['sessionDurationSeconds'] = p.sessionDurationSeconds;
   } else if (p.domain === 'people') {
     base['communicationCount'] = 1;
+    if ('messageCount' in p && p.messageCount != null) base['messageCount'] = p.messageCount;
   } else if (p.domain === 'mind') {
     if ('progressPercent' in p && p.progressPercent != null) base['progressPercent'] = p.progressPercent;
+    if ('visitCount' in p && p.visitCount != null) base['visitCount'] = p.visitCount;
+    if ('totalDurationSeconds' in p && p.totalDurationSeconds != null) base['totalDurationSeconds'] = p.totalDurationSeconds;
   }
 
   return base;
 }
 
 // ---------------------------------------------------------------------------
-// run() — the entry point
+// run() — the entry point (now with Dynamic Insight Composer)
 // ---------------------------------------------------------------------------
 
 export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
@@ -105,9 +110,10 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
   const errors: string[] = [];
   let patternsDetected = 0;
   let insightsGenerated = 0;
+  let composerInsights = 0;
 
   try {
-    // STEP 1: SNAPSHOT
+    // ── STEP 1: SNAPSHOT ────────────────────────────────────────────
     const allEvents: LifeEvent[] = [];
     for (const domain of ALL_DOMAINS) {
       try {
@@ -118,17 +124,19 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
       }
     }
 
-    if (allEvents.length < 50) {
-      console.log(`[inference] Insufficient data for inference pass (${allEvents.length} events, need 50+)`);
+    // Lower the threshold: OS observers can generate useful data quickly
+    if (allEvents.length < 20) {
+      console.log(`[inference] Insufficient data for inference pass (${allEvents.length} events, need 20+)`);
       return {
         insightsGenerated: 0,
         patternsDetected: 0,
+        composerInsights: 0,
         durationMs: Date.now() - startMs,
         errors,
       };
     }
 
-    // STEP 2: EMBED & SEARCH
+    // ── STEP 2: EMBED & SEARCH ──────────────────────────────────────
     const twoHoursAgo = Date.now() - 2 * 3600000;
     const recentEvents = allEvents.filter((e) => e.ingestedAt > twoHoursAgo);
     const semanticContext: Array<{ id: string; domain: string; summary: string }> = [];
@@ -142,11 +150,10 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
 
     if (sidecarAvailable && recentEvents.length > 0) {
       for (const event of recentEvents.slice(0, 10)) {
-        // Only search if event has an embedding (via summary)
         if (!event.summary) continue;
         try {
           const similar = await deps.sidecar.similaritySearch(
-            [], // We don't have the embedding here; the sidecar would need the text
+            [],
             5,
             [event.domain as LifeDomain],
           );
@@ -157,7 +164,7 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
       }
     }
 
-    // STEP 3: PATTERN DETECTION
+    // ── STEP 3: STATISTICAL PATTERN DETECTION ───────────────────────
     const patterns: DetectedPattern[] = [];
     if (sidecarAvailable) {
       try {
@@ -170,7 +177,7 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
       }
     }
 
-    // STEP 4: LLM REASONING
+    // ── STEP 4: LLM REASONING ON STATISTICAL PATTERNS ───────────────
     for (const pattern of patterns) {
       try {
         const insight = await reasonAboutPattern(pattern);
@@ -183,7 +190,7 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
       }
     }
 
-    // STEP 5: GOAL DRIFT CHECK
+    // ── STEP 5: GOAL DRIFT CHECK ────────────────────────────────────
     try {
       const goalInsights = await checkGoalDrift(deps.reader, allEvents);
       for (const insight of goalInsights) {
@@ -194,7 +201,31 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
       errors.push(`Goal drift check failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // STEP 6: PUBLISH
+    // ── STEP 6: DYNAMIC INSIGHT COMPOSER (THE BRAIN) ────────────────
+    // This is where the magic happens. The LLM looks at everything and
+    // discovers cross-domain insights no hardcoded rule could anticipate.
+    try {
+      const existingInsightTypes = getInsights().map((i) => i.insightType);
+      const snapshot = await buildLifeSnapshot(
+        deps.reader,
+        allEvents,
+        patterns,
+        existingInsightTypes,
+      );
+      const composed = await composerCompose(snapshot);
+      for (const insight of composed) {
+        publishInsight(insight);
+        composerInsights++;
+        insightsGenerated++;
+      }
+      if (composed.length > 0) {
+        console.log(`[inference] Composer generated ${composed.length} insights: ${composed.map((i) => i.insightType).join(', ')}`);
+      }
+    } catch (e) {
+      errors.push(`Composer failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // ── STEP 7: PUBLISH ─────────────────────────────────────────────
     evictExpired();
     const currentInsights = getInsights();
     deps.bus.emit('insights-updated', { insights: currentInsights });
@@ -206,13 +237,14 @@ export async function run(deps: InferenceEngineDeps): Promise<InferenceResult> {
   return {
     insightsGenerated,
     patternsDetected,
+    composerInsights,
     durationMs: Date.now() - startMs,
     errors,
   };
 }
 
 // ---------------------------------------------------------------------------
-// LLM Reasoning — convert pattern to LifeInsight
+// LLM Reasoning — convert statistical pattern to LifeInsight
 // ---------------------------------------------------------------------------
 
 async function reasonAboutPattern(pattern: DetectedPattern): Promise<LifeInsight | null> {
@@ -258,29 +290,48 @@ async function reasonAboutPattern(pattern: DetectedPattern): Promise<LifeInsight
       generatedAt: Date.now(),
       domains: pattern.domains as LifeDomain[],
       insightType,
+      category: 'expand-awareness',
+      urgency: insightType === 'anomaly' ? 'ambient' : 'digest',
       confidence: pattern.confidence,
       payload: {
         description: response.content,
+        whyItMatters: 'Statistical pattern detected in your life data.',
+        evidence: pattern.domains.map((d) => ({
+          domain: d as LifeDomain,
+          summary: `${pattern.type} detected`,
+          timeframe: 'last 72 hours',
+        })),
         metadata: pattern.metadata,
       },
       expiresAt: Date.now() + ttlMs,
       privacyLevel: 'private',
+      seen: false,
+      dismissed: false,
     };
   } catch (e) {
     console.warn(`[inference] LLM reasoning failed: ${e instanceof Error ? e.message : String(e)}`);
-    // Return a fallback insight without LLM text
     return {
       id: randomUUID(),
       generatedAt: Date.now(),
       domains: pattern.domains as LifeDomain[],
       insightType: pattern.type === 'correlation' ? 'correlation' : pattern.type === 'trend-change' ? 'trend-change' : 'anomaly',
+      category: 'expand-awareness',
+      urgency: 'digest',
       confidence: pattern.confidence,
       payload: {
         description: `${pattern.type} detected across ${pattern.domains.join(' and ')}`,
+        whyItMatters: 'A statistical pattern was detected in your life data.',
+        evidence: pattern.domains.map((d) => ({
+          domain: d as LifeDomain,
+          summary: `${pattern.type} detected`,
+          timeframe: 'last 72 hours',
+        })),
         metadata: pattern.metadata,
       },
       expiresAt: Date.now() + 24 * 3600000,
       privacyLevel: 'private',
+      seen: false,
+      dismissed: false,
     };
   }
 }
@@ -313,23 +364,31 @@ async function checkGoalDrift(
     );
 
     if (domainEvents.length === 0) {
-      // Zero relevant events in 14 days → high-confidence drift
       insights.push({
         id: randomUUID(),
         generatedAt: Date.now(),
         domains: [domain],
         insightType: 'goal-drift',
+        category: 'boost-output',
+        urgency: 'ambient',
         confidence: 0.9,
         payload: {
           description: `Goal "${goal.title}" has had no related activity in the ${domain} domain for over 14 days`,
+          whyItMatters: 'Goals without consistent activity tend to be abandoned. A small action today can restart momentum.',
+          suggestedAction: `Do one small thing related to "${goal.title}" today — even 5 minutes counts.`,
+          evidence: [{
+            domain,
+            summary: 'Zero events in this domain for 14+ days',
+            timeframe: 'last 14 days',
+          }],
           metadata: { goalId: goal.id, goalTitle: goal.title, daysSinceActivity: 14 },
         },
         expiresAt: Date.now() + 24 * 3600000,
         privacyLevel: 'private',
+        seen: false,
+        dismissed: false,
       });
     }
-    // If events exist but trend is declining, we'd check here
-    // but we need the trend-change patterns from the sidecar first
   }
 
   return insights;

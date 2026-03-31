@@ -14,13 +14,19 @@ function makeInsight(overrides: Partial<LifeInsight> = {}): LifeInsight {
     generatedAt: Date.now(),
     domains: ['body'] as LifeDomain[],
     insightType: 'trend-change',
+    category: 'expand-awareness',
+    urgency: 'ambient',
     confidence: 0.8,
     payload: {
       description: 'Test insight',
+      whyItMatters: 'Test reason',
+      evidence: [{ domain: 'body' as LifeDomain, summary: 'test', timeframe: 'last 72h' }],
       metadata: { direction: 'declining' },
     },
     expiresAt: Date.now() + 86400000,
     privacyLevel: 'private',
+    seen: false,
+    dismissed: false,
     ...overrides,
   };
 }
