@@ -1,0 +1,71 @@
+{
+  "kind": "calendar#events",
+  "summary": "user@example.com",
+  "updated": "2026-03-29T10:00:00.000Z",
+  "timeZone": "America/New_York",
+  "nextSyncToken": "sync_token_abc123",
+  "items": [
+    {
+      "id": "event_001",
+      "status": "confirmed",
+      "created": "2026-03-20T09:00:00.000Z",
+      "updated": "2026-03-20T09:00:00.000Z",
+      "summary": "Team Standup",
+      "start": {
+        "dateTime": "2026-03-29T09:00:00-04:00"
+      },
+      "end": {
+        "dateTime": "2026-03-29T09:30:00-04:00"
+      },
+      "attendees": [
+        { "email": "alice@company.com", "responseStatus": "accepted" },
+        { "email": "bob@company.com", "responseStatus": "accepted" },
+        { "email": "carol@company.com", "responseStatus": "tentative" }
+      ],
+      "organizer": {
+        "email": "alice@company.com"
+      },
+      "recurringEventId": "event_001_recurring"
+    },
+    {
+      "id": "event_002",
+      "status": "confirmed",
+      "created": "2026-03-25T14:00:00.000Z",
+      "updated": "2026-03-25T14:00:00.000Z",
+      "summary": "Dentist Appointment",
+      "start": {
+        "dateTime": "2026-03-29T14:00:00-04:00"
+      },
+      "end": {
+        "dateTime": "2026-03-29T15:00:00-04:00"
+      },
+      "attendees": [],
+      "organizer": {
+        "email": "user@gmail.com"
+      }
+    },
+    {
+      "id": "event_003",
+      "status": "confirmed",
+      "created": "2026-03-28T08:00:00.000Z",
+      "updated": "2026-03-28T08:00:00.000Z",
+      "summary": "All-Day Conference",
+      "start": {
+        "date": "2026-03-30"
+      },
+      "end": {
+        "date": "2026-03-31"
+      },
+      "attendees": [
+        { "email": "dave@company.com", "responseStatus": "accepted" },
+        { "email": "eve@company.com", "responseStatus": "needsAction" },
+        { "email": "frank@company.com", "responseStatus": "accepted" },
+        { "email": "grace@company.com", "responseStatus": "accepted" },
+        { "email": "heidi@company.com", "responseStatus": "accepted" }
+      ],
+      "organizer": {
+        "email": "dave@company.com"
+      }
+    }
+  ]
+}

@@ -1,14 +1,15 @@
 import { EventEmitter } from 'node:events';
 import type { LifeDomain } from '@pre/shared';
 
-type GatewayEvents = {
+export type GatewayEvents = {
   'gateway-ready': { timestamp: number };
   'events-ingested': { source: string; count: number; domains: LifeDomain[] };
   'sync-started': { source: string };
   'sync-completed': { source: string; eventsCount: number };
   'sync-failed': { source: string; error: string };
-  'insight-generated': { insightId: string; domains: LifeDomain[] };
-  'alert-fired': { ruleId: string; severity: string };
+  'adapter-needs-reauth': { source: string; error: string };
+  'insight-generated': { insightId: string; type: string };
+  'alert-fired': { alertId: string; severity: string; title: string };
 };
 
 export class EventBus {

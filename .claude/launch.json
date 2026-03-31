@@ -1,0 +1,39 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web",
+      "runtimeExecutable": "/Users/hussainalhashim/.nvm/versions/node/v23.4.0/bin/node",
+      "runtimeArgs": ["node_modules/vite/bin/vite.js", "--port", "5173"],
+      "port": 5173,
+      "cwd": "apps/web"
+    },
+    {
+      "name": "desktop",
+      "runtimeExecutable": "/Users/hussainalhashim/.nvm/versions/node/v23.4.0/bin/node",
+      "runtimeArgs": ["node_modules/vite/bin/vite.js", "--port", "1420"],
+      "port": 1420,
+      "cwd": "apps/desktop"
+    },
+    {
+      "name": "gateway",
+      "runtimeExecutable": "/Users/hussainalhashim/.nvm/versions/node/v23.4.0/bin/node",
+      "runtimeArgs": ["node_modules/tsx/dist/cli.mjs", "watch", "src/index.ts"],
+      "port": 18789,
+      "cwd": "apps/gateway"
+    },
+    {
+      "name": "docs",
+      "runtimeExecutable": "/Users/hussainalhashim/.nvm/versions/node/v23.4.0/bin/node",
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "--port", "3001"],
+      "port": 3001,
+      "cwd": "apps/docs"
+    },
+    {
+      "name": "sidecar",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["sidecar/main.py"],
+      "port": 0
+    }
+  ]
+}

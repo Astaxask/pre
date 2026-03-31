@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "PRE",
   "version": "0.1.0",
   "identifier": "com.astaxask.desktop",
   "build": {
@@ -13,9 +13,14 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "PRE",
+        "width": 320,
+        "height": 480,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "visible": false
       }
     ],
     "security": {

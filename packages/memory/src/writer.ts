@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import type { LifeEvent } from '@pre/shared';
 import { lifeEventSchema, ok, err, type Result } from '@pre/shared';
-import { lifeEvents } from './schema.js';
+import { lifeEvents, triggerLog, goals } from './schema.js';
 import { encryptPayload } from './encrypt.js';
 
 export type BatchWriteResult = {
@@ -11,9 +11,29 @@ export type BatchWriteResult = {
   errors: Array<{ sourceId: string; error: string }>;
 };
 
+export type TriggerLogWrite = {
+  id: string;
+  ruleId: string;
+  firedAt: number;
+  severity: string;
+};
+
+export type GoalWrite = {
+  id: string;
+  title: string;
+  domain: string;
+  targetDate: number | null;
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type MemoryWriter = {
   event(event: LifeEvent): Promise<Result<void, string>>;
   events(events: LifeEvent[]): Promise<BatchWriteResult>;
+  writeTriggerLog(entry: TriggerLogWrite): void;
+  deleteBySource(source: string): number;
+  writeGoal(goal: GoalWrite): void;
 };
 
 export function createWriter(
@@ -138,8 +158,49 @@ export function createWriter(
     return { inserted, skipped, errors };
   }
 
+  function writeTriggerLogEntry(entry: TriggerLogWrite): void {
+    drizzleDb
+      .insert(triggerLog)
+      .values({
+        id: entry.id,
+        ruleId: entry.ruleId,
+        firedAt: entry.firedAt,
+        severity: entry.severity,
+      })
+      .run();
+  }
+
+  function deleteBySource(source: string): number {
+    const result = db
+      .prepare('DELETE FROM life_events WHERE source = ?')
+      .run(source);
+    db.prepare(
+      'DELETE FROM embedding_sync WHERE event_id NOT IN (SELECT id FROM life_events)',
+    ).run();
+    return result.changes;
+  }
+
+  function writeGoal(goal: GoalWrite): void {
+    drizzleDb
+      .insert(goals)
+      .values({
+        id: goal.id,
+        title: goal.title,
+        domain: goal.domain,
+        targetDate: goal.targetDate,
+        status: goal.status,
+        createdAt: goal.createdAt,
+        updatedAt: goal.updatedAt,
+      })
+      .onConflictDoNothing()
+      .run();
+  }
+
   return {
     event: writeEvent,
     events: writeEvents,
+    writeTriggerLog: writeTriggerLogEntry,
+    deleteBySource,
+    writeGoal,
   };
 }
