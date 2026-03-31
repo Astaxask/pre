@@ -9,7 +9,7 @@ import type { MemoryReader, MemoryWriter } from '@pre/memory';
 import { openDatabase, createWriter, createReader } from '@pre/memory';
 import { runSimulation, type SimulationEngineDeps } from '@pre/engines';
 import { callModel } from '@pre/models';
-import { enqueueSyncJob } from './queues.js';
+import { enqueueSyncJob, enqueueSnoozeJob } from './queues.js';
 import type { SidecarClient } from './sidecar-client.js';
 
 // --- Gateway -> Surface messages ---
@@ -22,6 +22,7 @@ type SyncStatus = {
 
 export type GatewayMessage =
   | { type: 'alert'; payload: unknown }
+  | { type: 'alert-dismissed'; alertId: string }
   | { type: 'insight-update'; payload: unknown[] }
   | { type: 'sync-status'; payload: SyncStatus }
   | { type: 'query-result'; requestId: string; payload: unknown }
@@ -31,13 +32,15 @@ export type GatewayMessage =
 // --- Surface -> Gateway messages ---
 
 const queryRequestSchema = z.object({
-  method: z.enum(['recentByDomain', 'byTimeRange', 'goals', 'stats', 'daily-summary']),
+  method: z.enum(['recentByDomain', 'byTimeRange', 'goals', 'stats', 'daily-summary', 'goal-events']),
   domain: z.string().optional(),
   hours: z.number().optional(),
   start: z.number().optional(),
   end: z.number().optional(),
   domains: z.array(z.string()).optional(),
   status: z.string().optional(),
+  goalId: z.string().optional(),
+  days: z.number().optional(),
 });
 
 const surfaceMessageSchema = z.discriminatedUnion('type', [
@@ -85,6 +88,12 @@ const surfaceMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('mark-alerts-seen'),
+  }),
+  z.object({
+    type: z.literal('snooze-alert'),
+    alertId: z.string(),
+    durationHours: z.number().min(1).max(168),
+    alert: z.unknown(),
   }),
 ]);
 
@@ -313,6 +322,13 @@ async function handleMessage(
               dbSize,
             },
           });
+        } else if (q.method === 'goal-events' && q.goalId) {
+          const events = await reader.byGoalId(q.goalId, q.days ?? 90);
+          sendTo(ws, {
+            type: 'query-result',
+            requestId: msg.requestId,
+            payload: events,
+          });
         } else if (q.method === 'daily-summary') {
           const summary = await generateDailySummary(reader);
           sendTo(ws, {
@@ -384,6 +400,8 @@ async function handleMessage(
 
     case 'dismiss-alert': {
       seenAlertIds.add(msg.alertId);
+      // Broadcast to all other surfaces so they can remove the alert
+      broadcastExcept(ws, { type: 'alert-dismissed', alertId: msg.alertId });
       console.log(`[ws-server] Alert dismissed: ${msg.alertId}`);
       break;
     }
@@ -562,6 +580,19 @@ async function handleMessage(
       console.log('[ws-server] All alerts marked as seen');
       break;
     }
+
+    case 'snooze-alert': {
+      try {
+        const delayMs = msg.durationHours * 3600_000;
+        await enqueueSnoozeJob(msg.alertId, msg.alert, delayMs);
+        seenAlertIds.add(msg.alertId);
+        console.log(`[ws-server] Alert snoozed: ${msg.alertId} for ${msg.durationHours}h`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendTo(ws, { type: 'error', error: `Snooze failed: ${message}` });
+      }
+      break;
+    }
   }
 }
 
@@ -575,6 +606,15 @@ export function broadcast(message: GatewayMessage): void {
   const data = JSON.stringify(message);
   for (const ws of connections) {
     if (ws.readyState === WebSocket.OPEN) {
+      ws.send(data);
+    }
+  }
+}
+
+function broadcastExcept(sender: WebSocket, message: GatewayMessage): void {
+  const data = JSON.stringify(message);
+  for (const ws of connections) {
+    if (ws !== sender && ws.readyState === WebSocket.OPEN) {
       ws.send(data);
     }
   }

@@ -109,6 +109,9 @@ export function useGateway() {
 
           if (data.type === 'alert') {
             setAlerts((prev) => [data.payload as Alert, ...prev]);
+          } else if (data.type === 'alert-dismissed') {
+            const dismissedId = (data as { alertId: string }).alertId;
+            setAlerts((prev) => prev.filter((a) => a.id !== dismissedId));
           } else if (data.type === 'insight-update') {
             setInsights(data.payload as LifeInsight[]);
           }

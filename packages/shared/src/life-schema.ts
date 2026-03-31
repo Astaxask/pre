@@ -70,7 +70,8 @@ export type BodyPayload = {
     | 'activity'
     | 'recovery-score'
     | 'biometric'
-    | 'symptom';
+    | 'symptom'
+    | 'manual-log';
 
   // Sleep
   sleepDuration?: number;
@@ -100,6 +101,10 @@ export type BodyPayload = {
   // Symptom
   symptomDescription?: string;
   severity?: number;
+
+  // Manual log
+  contentHash?: string;
+  wordCount?: number;
 };
 
 export const bodyPayloadSchema = z.object({
@@ -112,6 +117,7 @@ export const bodyPayloadSchema = z.object({
     'recovery-score',
     'biometric',
     'symptom',
+    'manual-log',
   ]),
   sleepDuration: z.number().optional(),
   sleepScore: z.number().optional(),
@@ -130,6 +136,8 @@ export const bodyPayloadSchema = z.object({
   unit: z.string().optional(),
   symptomDescription: z.string().optional(),
   severity: z.number().optional(),
+  contentHash: z.string().optional(),
+  wordCount: z.number().optional(),
 });
 
 export type MoneyPayload = {
@@ -140,7 +148,8 @@ export type MoneyPayload = {
     | 'net-worth-snapshot'
     | 'bill-due'
     | 'income'
-    | 'transfer';
+    | 'transfer'
+    | 'manual-log';
 
   // Transaction
   amount?: number;
@@ -158,6 +167,10 @@ export type MoneyPayload = {
   billName?: string;
   dueDateTs?: number;
   estimatedAmount?: number;
+
+  // Manual log
+  contentHash?: string;
+  wordCount?: number;
 };
 
 export const moneyPayloadSchema = z.object({
@@ -169,6 +182,7 @@ export const moneyPayloadSchema = z.object({
     'bill-due',
     'income',
     'transfer',
+    'manual-log',
   ]),
   amount: z.number().optional(),
   currency: z.string().optional(),
@@ -183,6 +197,8 @@ export const moneyPayloadSchema = z.object({
   billName: z.string().optional(),
   dueDateTs: z.number().optional(),
   estimatedAmount: z.number().optional(),
+  contentHash: z.string().optional(),
+  wordCount: z.number().optional(),
 });
 
 export type PeoplePayload = {
@@ -190,7 +206,8 @@ export type PeoplePayload = {
   subtype:
     | 'communication'
     | 'meeting'
-    | 'relationship-signal';
+    | 'relationship-signal'
+    | 'manual-log';
 
   // Communication
   channel?: 'email' | 'sms' | 'slack' | 'whatsapp' | 'other';
@@ -204,11 +221,15 @@ export type PeoplePayload = {
     | 'long-silence'
     | 'reconnect';
   daysSinceLastContact?: number;
+
+  // Manual log
+  contentHash?: string;
+  wordCount?: number;
 };
 
 export const peoplePayloadSchema = z.object({
   domain: z.literal('people'),
-  subtype: z.enum(['communication', 'meeting', 'relationship-signal']),
+  subtype: z.enum(['communication', 'meeting', 'relationship-signal', 'manual-log']),
   channel: z
     .enum(['email', 'sms', 'slack', 'whatsapp', 'other'])
     .optional(),
@@ -223,6 +244,8 @@ export const peoplePayloadSchema = z.object({
     ])
     .optional(),
   daysSinceLastContact: z.number().optional(),
+  contentHash: z.string().optional(),
+  wordCount: z.number().optional(),
 });
 
 export type TimePayload = {
@@ -231,7 +254,8 @@ export type TimePayload = {
     | 'calendar-event'
     | 'time-block'
     | 'commitment'
-    | 'time-audit';
+    | 'time-audit'
+    | 'manual-log';
 
   // Calendar event
   title?: string;
@@ -246,6 +270,10 @@ export type TimePayload = {
   // Commitment (inferred)
   commitmentLabel?: string;
   weeklyHours?: number;
+
+  // Manual log
+  contentHash?: string;
+  wordCount?: number;
 };
 
 export const timePayloadSchema = z.object({
@@ -255,6 +283,7 @@ export const timePayloadSchema = z.object({
     'time-block',
     'commitment',
     'time-audit',
+    'manual-log',
   ]),
   title: z.string().optional(),
   durationMinutes: z.number().optional(),
@@ -268,6 +297,8 @@ export const timePayloadSchema = z.object({
     .optional(),
   commitmentLabel: z.string().optional(),
   weeklyHours: z.number().optional(),
+  contentHash: z.string().optional(),
+  wordCount: z.number().optional(),
 });
 
 export type MindPayload = {
@@ -277,7 +308,8 @@ export type MindPayload = {
     | 'goal-progress'
     | 'mood-log'
     | 'learning-session'
-    | 'reflection';
+    | 'reflection'
+    | 'manual-log';
 
   // Goal
   goalId?: string;
@@ -313,6 +345,7 @@ export const mindPayloadSchema = z.object({
     'mood-log',
     'learning-session',
     'reflection',
+    'manual-log',
   ]),
   goalId: z.string().optional(),
   goalTitle: z.string().optional(),
@@ -340,7 +373,8 @@ export type WorldPayload = {
   subtype:
     | 'weather'
     | 'location-context'
-    | 'external-event';
+    | 'external-event'
+    | 'manual-log';
 
   // Weather
   conditionSummary?: string;
@@ -358,11 +392,15 @@ export type WorldPayload = {
     | 'other';
   headline?: string;
   relevantDomains?: LifeDomain[];
+
+  // Manual log
+  contentHash?: string;
+  wordCount?: number;
 };
 
 export const worldPayloadSchema = z.object({
   domain: z.literal('world'),
-  subtype: z.enum(['weather', 'location-context', 'external-event']),
+  subtype: z.enum(['weather', 'location-context', 'external-event', 'manual-log']),
   conditionSummary: z.string().optional(),
   temperatureCelsius: z.number().optional(),
   locationType: z
@@ -373,6 +411,8 @@ export const worldPayloadSchema = z.object({
     .optional(),
   headline: z.string().optional(),
   relevantDomains: z.array(lifeDomainSchema).optional(),
+  contentHash: z.string().optional(),
+  wordCount: z.number().optional(),
 });
 
 // ---------------------------------------------------------------------------
