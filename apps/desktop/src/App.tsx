@@ -47,7 +47,7 @@ type AIThought = {
   importance: 'ambient' | 'notable' | 'important';
   timestamp: number;
   isNew?: boolean;
-  isStreaming?: boolean;
+  source: 'ai' | 'local';
 };
 
 type ObserverInfo = {
@@ -59,10 +59,10 @@ type ObserverInfo = {
 };
 
 // ---------------------------------------------------------------------------
-// AI Engine — calls Ollama via Tauri command (bypasses CORS)
+// AI Engine — calls Ollama via Tauri command
 // ---------------------------------------------------------------------------
 
-async function generateThoughts(): Promise<AIThought[]> {
+async function callAI(): Promise<AIThought[]> {
   try {
     const raw = await tauriInvoke<Array<{
       id: string;
@@ -81,147 +81,214 @@ async function generateThoughts(): Promise<AIThought[]> {
       importance: (t.importance as AIThought['importance']) || 'ambient',
       timestamp: t.timestamp || Date.now(),
       isNew: true,
+      source: 'ai' as const,
     }));
   } catch (err) {
-    console.error('AI thought generation failed:', err);
+    console.error('AI call failed:', err);
     return [];
   }
 }
 
-/** Generate smart fallback thoughts from raw observations when AI is slow */
-async function generateFallbackThoughts(): Promise<AIThought[]> {
-  const obs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 20 });
-  if (!obs || obs.length === 0) return [];
-
-  const thoughts: AIThought[] = [];
-  const now = Date.now();
-
-  // Analyze app usage patterns
-  const appSessions = obs.filter((o) => o.event_type === 'app-session');
-  const appCounts: Record<string, { total: number; count: number }> = {};
-  for (const s of appSessions) {
-    const name = (s.payload.appName as string) || 'Unknown';
-    const secs = (s.payload.sessionDurationSeconds as number) || 0;
-    if (!appCounts[name]) appCounts[name] = { total: 0, count: 0 };
-    appCounts[name].total += secs;
-    appCounts[name].count += 1;
-  }
-
-  // Most used app
-  const topApp = Object.entries(appCounts).sort((a, b) => b[1].total - a[1].total)[0];
-  if (topApp) {
-    const [name, data] = topApp;
-    const mins = Math.round(data.total / 60);
-    if (mins > 30) {
-      thoughts.push({
-        id: crypto.randomUUID(),
-        text: `You've spent ${mins} minutes in ${name} across ${data.count} sessions. That's a deep focus pattern.`,
-        category: 'pattern',
-        importance: 'notable',
-        timestamp: now,
-        isNew: true,
-      });
-    } else if (data.count > 5) {
-      thoughts.push({
-        id: crypto.randomUUID(),
-        text: `Switching to ${name} ${data.count} times — lots of quick checks. Are you waiting for something?`,
-        category: 'question',
-        importance: 'ambient',
-        timestamp: now,
-        isNew: true,
-      });
-    }
-  }
-
-  // App switching pattern
-  if (appSessions.length > 8) {
-    const uniqueApps = new Set(appSessions.map((s) => s.payload.appName as string)).size;
-    if (uniqueApps >= 4) {
-      thoughts.push({
-        id: crypto.randomUUID(),
-        text: `Jumping between ${uniqueApps} different apps — your attention is scattered right now. Might be worth picking one thing to focus on.`,
-        category: 'nudge',
-        importance: 'notable',
-        timestamp: now - 5000,
-        isNew: true,
-      });
-    }
-  }
-
-  // Browsing
-  const browsing = obs.filter((o) => o.event_type === 'browsing-session');
-  if (browsing.length > 0) {
-    const sites = [...new Set(browsing.map((b) => b.payload.domainVisited as string))];
-    if (sites.length > 3) {
-      thoughts.push({
-        id: crypto.randomUUID(),
-        text: `You've been across ${sites.length} different sites. Research mode, or rabbit hole?`,
-        category: 'reflection',
-        importance: 'ambient',
-        timestamp: now - 10000,
-        isNew: true,
-      });
-    }
-  }
-
-  // Time awareness
-  const hour = new Date().getHours();
-  if (hour >= 23 || hour < 4) {
-    thoughts.push({
-      id: crypto.randomUUID(),
-      text: `It's late. You're still active on your computer — is this intentional or did time slip away?`,
-      category: 'nudge',
-      importance: 'notable',
-      timestamp: now - 15000,
-      isNew: true,
-    });
-  }
-
-  // Generic if no patterns found
-  if (thoughts.length === 0 && obs.length > 0) {
-    thoughts.push({
-      id: crypto.randomUUID(),
-      text: `Collecting ${obs.length} observations so far. Building a picture of your day...`,
-      category: 'reflection',
-      importance: 'ambient',
-      timestamp: now,
-      isNew: true,
-    });
-  }
-
-  return thoughts;
-}
-
-async function checkAIAvailable(): Promise<boolean> {
+async function checkAI(): Promise<boolean> {
   try {
-    const result = await tauriInvoke<{ available: boolean; models: string[] }>('check_ai_status');
-    return result?.available ?? false;
+    const r = await tauriInvoke<{ available: boolean }>('check_ai_status');
+    return r?.available ?? false;
   } catch {
     return false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Seed thoughts (shown while AI warms up)
+// Smart local analysis — instant, no AI needed
 // ---------------------------------------------------------------------------
 
-function getSeedThoughts(): AIThought[] {
-  return [
-    {
-      id: 'seed-1',
-      text: 'Waking up... I can see your screen activity starting to flow in. Give me a moment to understand what you\'re working on.',
-      category: 'reflection',
-      importance: 'ambient',
-      timestamp: Date.now() - 30000,
-    },
-    {
-      id: 'seed-2',
-      text: 'I\'m your second brain — I\'ll be thinking about your life even when you\'re not looking. Check back anytime.',
-      category: 'reflection',
-      importance: 'notable',
-      timestamp: Date.now() - 15000,
-    },
-  ];
+async function analyzeLocally(): Promise<AIThought[]> {
+  const obs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 50 });
+  if (!obs || obs.length === 0) return [];
+
+  const thoughts: AIThought[] = [];
+  const now = Date.now();
+  const hour = new Date().getHours();
+
+  // ── Analyze app usage ──
+  const apps = obs.filter((o) => o.event_type === 'app-session');
+  const appStats: Record<string, { totalSec: number; count: number; lastSeen: number }> = {};
+
+  for (const s of apps) {
+    const name = (s.payload.appName as string) || 'Unknown';
+    const secs = (s.payload.sessionDurationSeconds as number) || 0;
+    if (!appStats[name]) appStats[name] = { totalSec: 0, count: 0, lastSeen: 0 };
+    appStats[name].totalSec += secs;
+    appStats[name].count += 1;
+    appStats[name].lastSeen = Math.max(appStats[name].lastSeen, s.timestamp);
+  }
+
+  const sortedApps = Object.entries(appStats).sort((a, b) => b[1].totalSec - a[1].totalSec);
+  const topApp = sortedApps[0];
+  const uniqueApps = sortedApps.length;
+
+  // Deep focus detection
+  if (topApp) {
+    const [name, data] = topApp;
+    const mins = Math.round(data.totalSec / 60);
+    if (mins >= 60) {
+      thoughts.push(mkThought(
+        `${mins} minutes in ${name}. That's a serious deep work session — whatever you're building, you're locked in.`,
+        'pattern', 'important',
+      ));
+    } else if (mins >= 20) {
+      thoughts.push(mkThought(
+        `${mins} minutes in ${name} so far. You're in a solid flow state.`,
+        'reflection', 'notable',
+      ));
+    } else if (mins >= 5) {
+      thoughts.push(mkThought(
+        `Working in ${name} — ${mins} minutes across ${data.count} sessions.`,
+        'reflection', 'ambient',
+      ));
+    }
+  }
+
+  // Context switching analysis
+  if (apps.length > 0) {
+    // Calculate switches in last 10 minutes
+    const recentApps = apps.filter((a) => now - a.timestamp < 600_000);
+    const recentSwitches = recentApps.length;
+
+    if (recentSwitches > 12) {
+      thoughts.push(mkThought(
+        `${recentSwitches} app switches in the last 10 minutes. Your mind is racing — maybe take a breath and pick one thing.`,
+        'nudge', 'notable',
+      ));
+    } else if (uniqueApps >= 5) {
+      const names = sortedApps.slice(0, 4).map(([n]) => n).join(', ');
+      thoughts.push(mkThought(
+        `Bouncing between ${uniqueApps} apps (${names}). Multi-tasking mode — or are you looking for something?`,
+        'question', 'ambient',
+      ));
+    }
+  }
+
+  // Two-app ping-pong pattern
+  if (sortedApps.length >= 2) {
+    const [first, second] = sortedApps;
+    if (first[1].count >= 3 && second[1].count >= 3) {
+      const ratio = Math.round(first[1].totalSec / Math.max(1, first[1].totalSec + second[1].totalSec) * 100);
+      thoughts.push(mkThought(
+        `You keep switching between ${first[0]} and ${second[0]} — ${ratio}/${100 - ratio} split. That's the rhythm of someone working through a problem.`,
+        'insight', 'notable',
+      ));
+    }
+  }
+
+  // ── Browsing patterns ──
+  const browsing = obs.filter((o) => o.event_type === 'browsing-session');
+  if (browsing.length > 0) {
+    const sites = [...new Set(browsing.map((b) => (b.payload.domainVisited as string) || ''))].filter(Boolean);
+    const visitCounts = browsing.reduce((acc, b) => {
+      const site = (b.payload.domainVisited as string) || '';
+      acc[site] = (acc[site] || 0) + ((b.payload.visitCount as number) || 1);
+      return acc;
+    }, {} as Record<string, number>);
+
+    const topSite = Object.entries(visitCounts).sort((a, b) => b[1] - a[1])[0];
+
+    if (topSite && topSite[1] >= 5) {
+      thoughts.push(mkThought(
+        `You've visited ${topSite[0]} ${topSite[1]} times. Something there keeps pulling you back.`,
+        'pattern', 'notable',
+      ));
+    } else if (sites.length >= 5) {
+      thoughts.push(mkThought(
+        `${sites.length} different sites browsed. Research mode — or just wandering?`,
+        'question', 'ambient',
+      ));
+    } else if (sites.length > 0) {
+      thoughts.push(mkThought(
+        `Browsing activity across ${sites.slice(0, 3).join(', ')}${sites.length > 3 ? '...' : ''}.`,
+        'reflection', 'ambient',
+      ));
+    }
+  }
+
+  // ── Music ──
+  const music = obs.filter((o) => o.event_type === 'now-playing');
+  if (music.length > 0) {
+    const latest = music[0];
+    const track = (latest.payload.trackTitle as string) || '';
+    const artist = (latest.payload.artistName as string) || '';
+    if (track) {
+      thoughts.push(mkThought(
+        `Listening to "${track}"${artist ? ` by ${artist}` : ''}. Music while working — you focus better with a soundtrack.`,
+        'reflection', 'ambient',
+      ));
+    }
+  }
+
+  // ── Time awareness ──
+  if (hour >= 23 || hour < 4) {
+    const totalMins = apps.reduce((s, a) => s + ((a.payload.sessionDurationSeconds as number) || 0), 0) / 60;
+    thoughts.push(mkThought(
+      `It's ${hour >= 23 ? 'nearly midnight' : 'the early hours'}. You've been active for ${Math.round(totalMins)} minutes. Is this intentional, or did time slip away?`,
+      'nudge', 'important',
+    ));
+  } else if (hour >= 20) {
+    thoughts.push(mkThought(
+      `Evening session. Your energy typically dips after 9pm — this might be a good time for lighter tasks.`,
+      'prediction', 'ambient',
+    ));
+  }
+
+  // ── Screen idle ──
+  const screenEvents = obs.filter((o) => o.event_type === 'screen-session');
+  const idleEvent = screenEvents.find((s) => (s.payload.screenState as string) === 'idle');
+  if (idleEvent) {
+    const idleMins = Math.round(((idleEvent.payload.idleDurationSeconds as number) || 0) / 60);
+    if (idleMins >= 15) {
+      thoughts.push(mkThought(
+        `You stepped away for ${idleMins} minutes. Good — breaks are when your subconscious does its best work.`,
+        'insight', 'notable',
+      ));
+    }
+  }
+
+  // ── Messages ──
+  const msgs = obs.filter((o) => o.event_type === 'communication');
+  if (msgs.length > 0) {
+    const totalMsgs = msgs.reduce((s, m) => s + ((m.payload.messageCount as number) || 1), 0);
+    if (totalMsgs > 20) {
+      thoughts.push(mkThought(
+        `${totalMsgs} messages exchanged. Heavy communication day — make sure you're not losing your deep work time to chat.`,
+        'nudge', 'notable',
+      ));
+    }
+  }
+
+  // ── Overall summary if we don't have enough specific thoughts ──
+  if (thoughts.length < 2 && obs.length > 5) {
+    thoughts.push(mkThought(
+      `${obs.length} observations collected. I'm building a picture of your patterns — the more data I gather, the deeper my insights will get.`,
+      'reflection', 'ambient',
+    ));
+  }
+
+  return thoughts.slice(0, 6); // Max 6 thoughts per cycle
+}
+
+function mkThought(
+  text: string,
+  category: AIThought['category'],
+  importance: AIThought['importance'],
+): AIThought {
+  return {
+    id: crypto.randomUUID(),
+    text,
+    category,
+    importance,
+    timestamp: Date.now() - Math.random() * 30000, // slight stagger
+    isNew: true,
+    source: 'local',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -252,115 +319,145 @@ export function App() {
   const [isThinking, setIsThinking] = useState(false);
   const [observers, setObservers] = useState<ObserverInfo[]>([]);
   const [observationCount, setObservationCount] = useState(0);
-  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
+  const [aiStatus, setAiStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   const [showStatus, setShowStatus] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
-  const thoughtIdSet = useRef(new Set<string>());
-  const lastGenerationRef = useRef(0);
-  const initialLoadDone = useRef(false);
+  const thinkingRef = useRef(false);
+  const cycleCountRef = useRef(0);
 
-  // ── Check if Ollama is available ──────────────────────────────
-  useEffect(() => {
-    checkAIAvailable().then(setAiAvailable);
-  }, []);
-
-  // ── Load observers status ─────────────────────────────────────
-  const refreshObservers = useCallback(async () => {
-    const obs = await tauriInvoke<ObserverInfo[]>('get_observer_status');
-    if (obs) setObservers(obs);
-  }, []);
-
-  // ── Helper to merge new thoughts into state ───────────────────
+  // ── Deduplicate and add new thoughts ───────────────────────────
   const addThoughts = useCallback((newThoughts: AIThought[]) => {
     if (newThoughts.length === 0) return;
 
     setThoughts((prev) => {
-      const existing = new Set(prev.map((t) => t.text.slice(0, 50)));
-      const fresh = newThoughts.filter((t) => !existing.has(t.text.slice(0, 50)));
-      fresh.forEach((t) => { t.isNew = true; });
+      const existing = new Set(prev.map((t) => t.text.slice(0, 40)));
+      const fresh = newThoughts.filter((t) => t.text && !existing.has(t.text.slice(0, 40)));
+      if (fresh.length === 0) return prev;
 
       const important = fresh.filter((t) => t.importance === 'important');
       if (important.length > 0) {
-        setPinnedThoughts((pp) => [...important, ...pp].slice(0, 3));
+        setPinnedThoughts((pp) => {
+          const existingPins = new Set(pp.map((p) => p.text.slice(0, 40)));
+          const newPins = important.filter((i) => !existingPins.has(i.text.slice(0, 40)));
+          return [...newPins, ...pp].slice(0, 3);
+        });
       }
 
-      return [...fresh, ...prev].slice(0, 50);
+      return [...fresh, ...prev].slice(0, 60);
     });
   }, []);
 
-  // ── Generate AI thoughts from observations ────────────────────
+  // ── Main think cycle ──────────────────────────────────────────
   const think = useCallback(async () => {
-    if (isThinking) return;
-    if (Date.now() - lastGenerationRef.current < 20000) return;
-
+    // Prevent overlapping calls with ref (not state — no stale closure)
+    if (thinkingRef.current) return;
+    thinkingRef.current = true;
     setIsThinking(true);
-    lastGenerationRef.current = Date.now();
+    cycleCountRef.current += 1;
 
     try {
-      // Get observation count
-      const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 30 });
-      setObservationCount(rawObs?.length ?? 0);
+      // 1. Get observation count
+      const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 50 });
+      const count = rawObs?.length ?? 0;
+      setObservationCount(count);
 
-      if (!rawObs || rawObs.length === 0) {
+      if (count === 0) return;
+
+      // 2. Instant local analysis (always works, <100ms)
+      const localThoughts = await analyzeLocally();
+      addThoughts(localThoughts);
+
+      // 3. Show "thinking done" for local, keep thinking indicator for AI
+      // Small delay so user sees local thoughts appear
+      await new Promise((r) => setTimeout(r, 500));
+
+      // 4. AI thoughts (slow, may take 30-90s) — fire and forget after local
+      callAI().then((aiThoughts) => {
+        if (aiThoughts.length > 0) {
+          addThoughts(aiThoughts);
+        }
+      }).catch(() => {
+        // AI failed silently — local thoughts already shown
+      }).finally(() => {
+        thinkingRef.current = false;
         setIsThinking(false);
-        return;
-      }
+      });
 
-      // Immediately show smart fallback thoughts (instant, no AI needed)
-      const fallback = await generateFallbackThoughts();
-      addThoughts(fallback);
-
-      // Then try AI thoughts (may take 10-45 seconds)
-      const aiThoughts = await generateThoughts();
-      if (aiThoughts.length > 0) {
-        addThoughts(aiThoughts);
-      }
+      // Don't wait for AI — return now so UI isn't blocked
+      // (the finally above will clear thinking state when AI finishes)
+      return;
     } catch (err) {
-      console.error('Thinking failed:', err);
-    } finally {
+      console.error('Think cycle failed:', err);
+      thinkingRef.current = false;
       setIsThinking(false);
     }
-  }, [isThinking, addThoughts]);
+  }, [addThoughts]);
 
   // ── Initial setup ─────────────────────────────────────────────
   useEffect(() => {
-    if (initialLoadDone.current) return;
-    initialLoadDone.current = true;
+    // Check AI status
+    checkAI().then((ok) => setAiStatus(ok ? 'online' : 'offline'));
 
-    refreshObservers();
+    // Load observers
+    tauriInvoke<ObserverInfo[]>('get_observer_status').then((obs) => {
+      if (obs) setObservers(obs);
+    });
 
-    // Immediately try to show smart thoughts from existing observations
-    (async () => {
-      const fallback = await generateFallbackThoughts();
-      if (fallback.length > 0) {
-        setThoughts(fallback);
-      } else {
-        setThoughts(getSeedThoughts());
-      }
+    // First think cycle immediately
+    think();
 
-      // Then kick off AI thinking in background
-      setTimeout(() => think(), 2000);
-    })();
-  }, [think, refreshObservers]);
+    // Periodic: local analysis every 30s, AI every 90s
+    let localInterval: ReturnType<typeof setInterval>;
+    let aiInterval: ReturnType<typeof setInterval>;
+    let obsInterval: ReturnType<typeof setInterval>;
 
-  // ── Periodic thinking loop ────────────────────────────────────
-  useEffect(() => {
-    const interval = setInterval(() => {
-      think();
-      refreshObservers();
-    }, 60_000); // Think every 60 seconds
+    // After initial think, set up intervals
+    const setupTimer = setTimeout(() => {
+      // Refresh local analysis frequently
+      localInterval = setInterval(async () => {
+        const localThoughts = await analyzeLocally();
+        addThoughts(localThoughts);
+        // Update observation count
+        const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 50 });
+        setObservationCount(rawObs?.length ?? 0);
+      }, 30_000);
 
-    return () => clearInterval(interval);
-  }, [think, refreshObservers]);
+      // AI thinking less frequently (it's slow)
+      aiInterval = setInterval(async () => {
+        if (thinkingRef.current) return;
+        thinkingRef.current = true;
+        setIsThinking(true);
+        try {
+          const aiThoughts = await callAI();
+          if (aiThoughts.length > 0) addThoughts(aiThoughts);
+        } catch { /* silent */ }
+        thinkingRef.current = false;
+        setIsThinking(false);
+      }, 90_000);
+
+      // Observer status refresh
+      obsInterval = setInterval(async () => {
+        const obs = await tauriInvoke<ObserverInfo[]>('get_observer_status');
+        if (obs) setObservers(obs);
+      }, 15_000);
+    }, 5000);
+
+    return () => {
+      clearTimeout(setupTimer);
+      clearInterval(localInterval);
+      clearInterval(aiInterval);
+      clearInterval(obsInterval);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Clear "new" flag after animation ──────────────────────────
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      setThoughts((prev) =>
-        prev.map((t) => (t.isNew ? { ...t, isNew: false } : t))
-      );
-    }, 2000);
-    return () => clearTimeout(timeout);
+    if (thoughts.some((t) => t.isNew)) {
+      const timeout = setTimeout(() => {
+        setThoughts((prev) => prev.map((t) => (t.isNew ? { ...t, isNew: false } : t)));
+      }, 1500);
+      return () => clearTimeout(timeout);
+    }
   }, [thoughts]);
 
   // ── Derived state ─────────────────────────────────────────────
@@ -369,19 +466,20 @@ export function App() {
 
   return (
     <div className="flex h-screen w-full flex-col" style={{ background: '#0a0a0a' }}>
-      {/* ── Minimal header ─────────────────────────────────────── */}
+      {/* ── Header ─────────────────────────────────────────────── */}
       <header className="flex items-center justify-between px-5 py-3 shrink-0">
         <div className="flex items-center gap-2.5">
-          <div className="relative">
+          <div className="relative flex items-center justify-center" style={{ width: 10, height: 10 }}>
             <div
-              className={`h-2 w-2 rounded-full ${
-                isThinking ? 'bg-accent glow-breathe' : thoughts.length > 2 ? 'bg-positive' : 'bg-text-tertiary'
-              }`}
-              style={isThinking ? { background: '#7b9aff' } : thoughts.length > 2 ? { background: '#4ade80' } : {}}
+              className="h-2 w-2 rounded-full"
+              style={{
+                background: isThinking ? '#7b9aff' : thoughts.length > 2 ? '#4ade80' : '#3a3a36',
+                transition: 'background 0.5s ease',
+              }}
             />
             {isThinking && (
               <div
-                className="absolute inset-0 h-2 w-2 rounded-full"
+                className="absolute h-2 w-2 rounded-full"
                 style={{
                   background: '#7b9aff',
                   animation: 'pulse-subtle 1.5s ease-in-out infinite',
@@ -389,17 +487,11 @@ export function App() {
               />
             )}
           </div>
-          <span
-            className="text-xs font-medium tracking-wide"
-            style={{ color: '#e8e8e4', letterSpacing: '0.1em' }}
-          >
+          <span style={{ color: '#e8e8e4', fontSize: 13, fontWeight: 500, letterSpacing: '0.08em' }}>
             PRE
           </span>
           {isThinking && (
-            <span
-              className="text-xs fade-in"
-              style={{ color: '#4a4a46' }}
-            >
+            <span className="fade-in" style={{ color: '#4a4a46', fontSize: 11 }}>
               thinking...
             </span>
           )}
@@ -408,14 +500,16 @@ export function App() {
         <button
           type="button"
           onClick={() => setShowStatus(!showStatus)}
-          className="text-xs transition-colors"
-          style={{ color: '#4a4a46', cursor: 'pointer', background: 'none', border: 'none' }}
+          style={{
+            color: '#4a4a46', fontSize: 11, cursor: 'pointer',
+            background: 'none', border: 'none', padding: '2px 6px',
+          }}
         >
-          {totalEvents > 0 ? `${totalEvents} signals` : 'starting'}
+          {totalEvents > 0 ? `${totalEvents} signals` : observationCount > 0 ? `${observationCount} obs` : '...'}
         </button>
       </header>
 
-      {/* ── Status panel (collapsible) ──────────────────────────── */}
+      {/* ── Status panel ────────────────────────────────────────── */}
       {showStatus && (
         <div
           className="px-5 py-3 fade-in"
@@ -426,39 +520,22 @@ export function App() {
           }}
         >
           <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs" style={{ color: '#4a4a46' }}>
-                AI Engine
-              </span>
-              <span className="text-xs" style={{ color: aiAvailable ? '#4ade80' : '#f87171' }}>
-                {aiAvailable === null ? 'checking...' : aiAvailable ? `${MODEL}` : 'offline'}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs" style={{ color: '#4a4a46' }}>
-                Observations
-              </span>
-              <span className="text-xs" style={{ color: '#8a8a86' }}>
-                {observationCount} in buffer
-              </span>
-            </div>
+            <StatusRow label="AI Engine" value={
+              aiStatus === 'online' ? 'llama3.1:8b' : aiStatus === 'offline' ? 'offline' : '...'
+            } ok={aiStatus === 'online'} />
+            <StatusRow label="Observations" value={`${observationCount} buffered`} ok={observationCount > 0} />
+            <StatusRow label="Observers" value={`${activeObs.length} active`} ok={activeObs.length > 0} />
             {observers.map((obs) => (
-              <div key={obs.name} className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+              <div key={obs.name} className="flex items-center justify-between pl-3">
+                <div className="flex items-center gap-1.5">
                   <div
                     className="h-1 w-1 rounded-full"
-                    style={{ background: obs.enabled ? '#4ade80' : '#2a2a26' }}
+                    style={{ background: obs.enabled && obs.events_collected > 0 ? '#4ade80' : obs.enabled ? '#fbbf24' : '#2a2a26' }}
                   />
-                  <span className="text-xs" style={{ color: '#4a4a46' }}>
-                    {obs.name}
-                  </span>
+                  <span style={{ color: '#3a3a36', fontSize: 10 }}>{obs.name}</span>
                 </div>
-                <span className="text-xs" style={{ color: '#3a3a36' }}>
-                  {obs.events_collected > 0
-                    ? obs.events_collected
-                    : obs.enabled
-                      ? '...'
-                      : 'off'}
+                <span style={{ color: '#2a2a26', fontSize: 10 }}>
+                  {obs.events_collected > 0 ? obs.events_collected : obs.enabled ? 'waiting' : 'off'}
                 </span>
               </div>
             ))}
@@ -466,53 +543,72 @@ export function App() {
         </div>
       )}
 
-      {/* ── Pinned important thoughts ───────────────────────────── */}
+      {/* ── Pinned thoughts ──────────────────────────────────────── */}
       {pinnedThoughts.length > 0 && (
         <div
-          className="px-5 py-3 shrink-0"
+          className="px-5 py-2 shrink-0"
           style={{
             borderBottom: '1px solid rgba(255,255,255,0.04)',
             background: 'rgba(251, 191, 36, 0.02)',
           }}
         >
-          {pinnedThoughts.map((thought) => (
-            <PinnedThought key={thought.id} thought={thought} />
+          {pinnedThoughts.map((t) => (
+            <div key={t.id} className="py-1.5">
+              <p style={{ color: '#e8e8e4', fontSize: 13, lineHeight: 1.7, fontWeight: 400 }}>
+                {t.text}
+              </p>
+              <span style={{ color: '#fbbf2430', fontSize: 9 }}>pinned</span>
+            </div>
           ))}
         </div>
       )}
 
-      {/* ── Thought stream — the consciousness ──────────────────── */}
-      <div ref={streamRef} className="flex-1 overflow-y-auto px-5 pt-4 pb-6">
+      {/* ── Thought stream ──────────────────────────────────────── */}
+      <div ref={streamRef} className="flex-1 overflow-y-auto px-5 pt-3 pb-8">
         {thoughts.length === 0 ? (
-          <WakingUp />
+          <div className="flex flex-col items-center justify-center h-full px-8">
+            <div
+              className="h-3 w-3 rounded-full mb-6 glow-breathe"
+              style={{ background: '#7b9aff' }}
+            />
+            <p style={{ color: '#4a4a46', fontSize: 13, textAlign: 'center', maxWidth: 260 }}>
+              Observing your digital life...
+            </p>
+            <p style={{ color: '#2a2a26', fontSize: 11, textAlign: 'center', marginTop: 8, maxWidth: 220 }}>
+              Thoughts will appear as I learn your patterns.
+            </p>
+          </div>
         ) : (
-          <div className="flex flex-col gap-0.5">
+          <div className="flex flex-col">
             {thoughts.map((thought) => (
-              <ThoughtEntry key={thought.id} thought={thought} />
+              <ThoughtBubble key={thought.id} thought={thought} />
             ))}
           </div>
         )}
       </div>
 
-      {/* ── Ambient footer ──────────────────────────────────────── */}
+      {/* ── Footer ──────────────────────────────────────────────── */}
       <footer
         className="flex items-center justify-between px-5 py-2 shrink-0"
         style={{ borderTop: '1px solid rgba(255,255,255,0.03)' }}
       >
-        <span className="text-xs" style={{ color: '#2a2a26' }}>
-          {thoughts.length > 2
-            ? `${thoughts.length} thoughts`
-            : 'warming up'}
+        <span style={{ color: '#2a2a26', fontSize: 10 }}>
+          {thoughts.filter((t) => t.source === 'ai').length > 0
+            ? `${thoughts.length} thoughts · ${thoughts.filter((t) => t.source === 'ai').length} from AI`
+            : `${thoughts.length} thoughts`}
         </span>
         <button
           type="button"
-          onClick={() => think()}
-          className="text-xs transition-all"
+          onClick={() => {
+            if (!thinkingRef.current) think();
+          }}
           style={{
-            color: isThinking ? '#3a3a36' : '#4a4a46',
+            color: isThinking ? '#2a2a26' : '#4a4a46',
+            fontSize: 10,
             cursor: isThinking ? 'default' : 'pointer',
             background: 'none',
             border: 'none',
+            padding: '2px 6px',
           }}
           disabled={isThinking}
         >
@@ -524,109 +620,64 @@ export function App() {
 }
 
 // ---------------------------------------------------------------------------
-// ThoughtEntry — a single thought in the stream
+// ThoughtBubble — a single thought in the consciousness stream
 // ---------------------------------------------------------------------------
 
-const CATEGORY_MARKERS: Record<string, { symbol: string; color: string }> = {
-  reflection: { symbol: '', color: '#8a8a86' },
-  insight: { symbol: '', color: '#7b9aff' },
-  pattern: { symbol: '', color: '#a78bfa' },
-  question: { symbol: '', color: '#fbbf24' },
-  prediction: { symbol: '', color: '#34d399' },
-  nudge: { symbol: '', color: '#fb923c' },
+const CATEGORY_COLORS: Record<string, string> = {
+  reflection: '#6a6a66',
+  insight: '#7b9aff',
+  pattern: '#a78bfa',
+  question: '#fbbf24',
+  prediction: '#34d399',
+  nudge: '#fb923c',
 };
 
-function ThoughtEntry({ thought }: { thought: AIThought }) {
-  const marker = CATEGORY_MARKERS[thought.category] || CATEGORY_MARKERS.reflection;
-  const isNotable = thought.importance === 'notable' || thought.importance === 'important';
+function ThoughtBubble({ thought }: { thought: AIThought }) {
+  const catColor = CATEGORY_COLORS[thought.category] || '#6a6a66';
+  const isNotable = thought.importance !== 'ambient';
 
   return (
     <div
-      className={`py-3 ${thought.isNew ? 'thought-enter' : ''}`}
+      className={thought.isNew ? 'thought-enter' : ''}
       style={{
-        borderLeft: isNotable ? `1.5px solid ${marker.color}20` : '1.5px solid transparent',
-        paddingLeft: '16px',
-        marginLeft: '-16px',
+        padding: '10px 0 10px 14px',
+        borderLeft: isNotable ? `1.5px solid ${catColor}25` : '1.5px solid transparent',
+        transition: 'border-color 0.3s ease',
       }}
     >
-      <p
-        className="text-sm leading-relaxed"
-        style={{
-          color: isNotable ? '#d4d4d0' : '#9a9a96',
-          fontWeight: isNotable ? 400 : 300,
-          lineHeight: 1.7,
-        }}
-      >
+      <p style={{
+        color: isNotable ? '#d4d4d0' : '#8a8a86',
+        fontSize: 13,
+        lineHeight: 1.75,
+        fontWeight: isNotable ? 400 : 300,
+        margin: 0,
+      }}>
         {thought.text}
       </p>
-      <div className="flex items-center gap-3 mt-1.5">
-        <span
-          className="text-xs"
-          style={{ color: '#2a2a26', fontSize: '10px' }}
-        >
+      <div className="flex items-center gap-3" style={{ marginTop: 4 }}>
+        <span style={{ color: '#1e1e1c', fontSize: 9 }}>
           {relativeTime(thought.timestamp)}
         </span>
-        <span
-          className="text-xs"
-          style={{ color: `${marker.color}40`, fontSize: '10px' }}
-        >
+        <span style={{ color: `${catColor}35`, fontSize: 9 }}>
           {thought.category}
         </span>
+        {thought.source === 'ai' && (
+          <span style={{ color: '#7b9aff20', fontSize: 9 }}>ai</span>
+        )}
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// PinnedThought — important insight pinned at top
+// StatusRow
 // ---------------------------------------------------------------------------
 
-function PinnedThought({ thought }: { thought: AIThought }) {
+function StatusRow({ label, value, ok }: { label: string; value: string; ok: boolean }) {
   return (
-    <div className="py-2">
-      <p
-        className="text-sm leading-relaxed"
-        style={{
-          color: '#e8e8e4',
-          fontWeight: 400,
-          lineHeight: 1.7,
-        }}
-      >
-        {thought.text}
-      </p>
-      <span
-        className="text-xs mt-1 inline-block"
-        style={{ color: '#fbbf2440', fontSize: '10px' }}
-      >
-        pinned
-      </span>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// WakingUp — shown while the brain initializes
-// ---------------------------------------------------------------------------
-
-function WakingUp() {
-  return (
-    <div className="flex flex-col items-center justify-center h-full px-8">
-      <div
-        className="h-3 w-3 rounded-full mb-6 glow-breathe"
-        style={{ background: '#7b9aff' }}
-      />
-      <p
-        className="text-sm text-center leading-relaxed"
-        style={{ color: '#4a4a46', maxWidth: '280px' }}
-      >
-        Observing your digital life...
-      </p>
-      <p
-        className="text-xs text-center mt-2"
-        style={{ color: '#2a2a26', maxWidth: '240px' }}
-      >
-        I&apos;ll start thinking once I have enough to work with.
-      </p>
+    <div className="flex items-center justify-between">
+      <span style={{ color: '#4a4a46', fontSize: 11 }}>{label}</span>
+      <span style={{ color: ok ? '#4ade80' : '#f87171', fontSize: 11 }}>{value}</span>
     </div>
   );
 }
