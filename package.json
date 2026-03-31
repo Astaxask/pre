@@ -9,7 +9,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "check-types": "turbo run check-types",
     "start": "bash scripts/start.sh",
-    "start:web": "pnpm --filter @pre/web dev",
+    "start:web": "pnpm --filter web dev",
     "setup:google": "pnpm --filter @pre/integrations setup:google"
   },
   "devDependencies": {
