@@ -277,6 +277,7 @@ async function main(): Promise<void> {
     encryptionKey,
     configPath: getConfigPath(),
     sidecarClient,
+    adapters,
   });
 
   // Wire event bus to broadcast sync status updates to connected surfaces
