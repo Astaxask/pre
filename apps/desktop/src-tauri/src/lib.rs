@@ -1043,9 +1043,10 @@ pub fn run() {
             .decorations(false)
             .always_on_top(true)
             .visible(false)
-            .inner_size(700.0, 136.0)
+            .inner_size(560.0, 148.0)
             .resizable(false)
             .skip_taskbar(true)
+            .transparent(true)
             .build()?;
 
             // ── Tray icon ────────────────────────────────────────────────
@@ -1081,12 +1082,12 @@ pub fn run() {
                                     ))
                                     .unwrap_or((2880.0, 1800.0, 2.0));
 
-                                let win_w = 700.0_f64;
-                                let win_h = 136.0_f64;
+                                let win_w = 560.0_f64;
+                                let win_h = 148.0_f64;
                                 let sw_l = sw / sf; // logical screen width
                                 let sh_l = sh / sf; // logical screen height
                                 let x = ((sw_l / 2.0) - (win_w / 2.0)).max(0.0);
-                                let y = sh_l - win_h - 80.0; // 80px above taskbar/dock
+                                let y = ((sh_l * 0.32) - (win_h / 2.0)).max(0.0); // upper-third, like Spotlight
 
                                 let _ = cmd_win.set_position(
                                     tauri::LogicalPosition::new(x, y),
