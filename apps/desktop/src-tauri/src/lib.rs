@@ -1070,10 +1070,12 @@ pub fn run() {
                     // including fullscreen apps.
                     ns_win.setLevel(25);
 
-                    // Bits: canJoinAllSpaces (0) | fullScreenAuxiliary (8) | stationary (4)
-                    // This makes the window visible on every Space and
-                    // alongside fullscreen apps without being displaced.
-                    let behavior: usize = (1 << 0) | (1 << 8) | (1 << 4);
+                    // Bits: moveToActiveSpace (1) | fullScreenAuxiliary (8)
+                    // moveToActiveSpace: window follows the user to whichever
+                    // Space is active, including fullscreen app Spaces.
+                    // fullScreenAuxiliary: allowed to appear alongside
+                    // a fullscreen window without displacing it.
+                    let behavior: usize = (1 << 1) | (1 << 8);
                     let _: () = objc2::msg_send![&*ns_win, setCollectionBehavior: behavior];
                 }
             }
@@ -1122,6 +1124,33 @@ pub fn run() {
                                     tauri::LogicalPosition::new(x, y),
                                 );
                                 let _ = cmd_win.show();
+
+                                // Native macOS: force the window above fullscreen apps
+                                #[cfg(target_os = "macos")]
+                                {
+                                    use objc2_app_kit::NSWindow;
+                                    use objc2::rc::Retained;
+
+                                    // Activate our app so macOS lets us take focus
+                                    let _: () = unsafe {
+                                        let ns_app: *mut objc2::runtime::NSObject =
+                                            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+                                        objc2::msg_send![ns_app, activateIgnoringOtherApps: true]
+                                    };
+
+                                    // Force the window to the front regardless of Space
+                                    if let Ok(raw) = cmd_win.ns_window() {
+                                        let ns_win: Retained<NSWindow> = unsafe {
+                                            Retained::retain(raw as *mut NSWindow)
+                                        }.expect("NSWindow null");
+                                        unsafe {
+                                            let _: () = objc2::msg_send![&*ns_win, orderFrontRegardless];
+                                            let _: () = objc2::msg_send![&*ns_win, makeKeyAndOrderFront: std::ptr::null::<objc2::runtime::NSObject>()];
+                                        }
+                                    }
+                                }
+
+                                #[cfg(not(target_os = "macos"))]
                                 let _ = cmd_win.set_focus();
                             }
                         }
