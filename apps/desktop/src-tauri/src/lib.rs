@@ -483,7 +483,7 @@ fn get_thinking_stream(limit: Option<i64>) -> Result<Vec<serde_json::Value>, Str
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
+async fn generate_ai_thoughts(limit: Option<i64>, custom_prompt: Option<String>) -> Result<Vec<serde_json::Value>, String> {
     // 1. Read recent observations
     let observations = get_recent_observations(limit)?;
     if observations.is_empty() {
@@ -553,24 +553,28 @@ async fn generate_ai_thoughts(limit: Option<i64>) -> Result<Vec<serde_json::Valu
         memory_section.push('\n');
     }
 
-    // 4. Build prompt with memory context
-    let prompt = format!(
-r#"You are PRE, a personal second brain. It's {} {}.
+    // 4. Build prompt — use custom prompt from frontend if provided, else default
+    let prompt = if let Some(ref cp) = custom_prompt {
+        cp.clone()
+    } else {
+        format!(
+r#"You are PRE, a personal life strategist. It's {} {}.
 
 {}Current activity:
 {}
 
-Write 2-3 NEW thoughts. Don't repeat previous thoughts. Be warm, insightful, surprising. Think about what their behavior means for their life — goals, health, money, time, relationships. Give actionable advice when you can.
+Write 2-3 ideas or provocations the user hasn't thought of. Don't describe what they're doing — reveal what it MEANS. Surface blind spots, hidden opportunities, uncomfortable truths. Be specific and direct.
 
 Reply ONLY with JSON:
-[{{"text":"...","category":"reflection","importance":"notable"}}]
-Categories: reflection, insight, pattern, question, prediction, nudge, plan, memory
-Importance: ambient, notable, important"#,
-        chrono::Local::now().format("%H:%M"),
-        time_ctx,
-        memory_section,
-        context_lines.join("\n")
-    );
+[{{"text":"...","category":"insight","importance":"notable"}}]
+Categories: idea, blindspot, question, challenge, insight, prediction
+Importance: notable, important"#,
+            chrono::Local::now().format("%H:%M"),
+            time_ctx,
+            memory_section,
+            context_lines.join("\n")
+        )
+    };
 
     // 5. Call Ollama
     let client = reqwest::Client::new();
