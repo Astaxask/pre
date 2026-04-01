@@ -85,25 +85,20 @@ export function CommandInput() {
   const hasResult = result !== null;
 
   return (
-    /* Full-window shell — dark fill so window corners are invisible */
+    /* The card IS the window — no outer wrapper, no black rectangle */
     <div style={{
       width: '100vw', height: '100vh',
-      background: '#0d0d10',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'linear-gradient(145deg, #1a1a20 0%, #141418 100%)',
+      borderRadius: 22,
+      border: '1px solid rgba(255,255,255,0.12)',
+      boxShadow: '0 24px 64px rgba(0,0,0,0.8), 0 2px 12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06)',
+      overflow: 'hidden',
+      display: 'flex', flexDirection: 'column',
+      opacity: show ? 1 : 0,
+      transform: show ? 'translateY(0) scale(1)' : 'translateY(8px) scale(0.98)',
+      transition: 'opacity 0.16s ease, transform 0.16s ease',
       fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif',
     }}>
-      {/* ── The visible card ── */}
-      <div style={{
-        width: 'calc(100% - 24px)',
-        background: 'linear-gradient(145deg, #1a1a20 0%, #141418 100%)',
-        borderRadius: 22,
-        border: '1px solid rgba(255,255,255,0.12)',
-        boxShadow: '0 24px 64px rgba(0,0,0,0.8), 0 2px 12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06)',
-        overflow: 'hidden',
-        opacity: show ? 1 : 0,
-        transform: show ? 'translateY(0) scale(1)' : 'translateY(8px) scale(0.98)',
-        transition: 'opacity 0.16s ease, transform 0.16s ease',
-      }}>
 
         {/* Subtle top glow line */}
         <div style={{
@@ -238,7 +233,6 @@ export function CommandInput() {
             </span>
           </div>
         )}
-      </div>
     </div>
   );
 }
