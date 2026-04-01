@@ -60,12 +60,25 @@ export function deriveTraits(obs: RawObs[], memory: CoreMemoryBlock[]): Trait[] 
   const sorted = Object.entries(appStats).sort((a, b) => b[1].sec - a[1].sec);
   const totalSec = sorted.reduce((s, [, d]) => s + d.sec, 0);
 
-  // Site visits
+  // Site visits + content map: domain → slugs
   const siteV: Record<string, number> = {};
+  const contentMap: Record<string, string[]> = {};
   for (const b of browsing) {
-    const s = (b.payload.domainVisited as string) || '';
-    if (s) siteV[s] = (siteV[s] || 0) + ((b.payload.visitCount as number) || 1);
+    const domain = (b.payload.domainVisited as string) || '';
+    const slug   = (b.payload.pageSlug as string) || '';
+    const visits = (b.payload.visitCount as number) || 1;
+    if (domain) siteV[domain] = (siteV[domain] || 0) + visits;
+    if (domain && slug) {
+      if (!contentMap[domain]) contentMap[domain] = [];
+      if (!contentMap[domain].includes(slug)) contentMap[domain].push(slug);
+    }
   }
+
+  // Flatten kick + twitch slugs for streamer-watching detection
+  const streamSlugs = [
+    ...(contentMap['kick.com'] || []),
+    ...(contentMap['twitch.tv'] || []),
+  ];
 
   const devApps = ['Cursor', 'VS Code', 'Code', 'Terminal', 'iTerm2', 'Xcode', 'WebStorm'];
   const creativeApps = ['Figma', 'Sketch', 'Photoshop', 'Illustrator', 'Blender'];
@@ -189,12 +202,17 @@ export function deriveTraits(obs: RawObs[], memory: CoreMemoryBlock[]): Trait[] 
   // ── Trait: Streamer / Visual Learner ─────────────────────────────────
   const kickVisits = (siteV['kick.com'] || 0) + (siteV['www.kick.com'] || 0);
   const ytVisits = (siteV['www.youtube.com'] || 0) + (siteV['youtube.com'] || 0);
-  if (kickVisits >= 2 || ytVisits >= 3) {
+  if (kickVisits >= 2 || ytVisits >= 3 || streamSlugs.length > 0) {
+    const streamers = streamSlugs.length > 0
+      ? `Watching: ${streamSlugs.join(', ')}.`
+      : 'Regular streaming platform activity.';
+    const ytChannels = contentMap['youtube.com'] || [];
+    const channelCtx = ytChannels.length > 0 ? ` Follows ${ytChannels.join(', ')} on YouTube.` : '';
     traits.push({
       id: 'visual-learner',
       name: 'Visual / Stream Learner',
       description: 'You learn by watching people do things in real time. This is actually the most effective way to build tacit knowledge — the kind that can\'t be found in docs.',
-      evidence: `Regular streaming platform visits — you observe to learn, not just for entertainment.`,
+      evidence: `${streamers}${channelCtx} You observe to understand systems, not just consume.`,
       score: 68,
       icon: '📺',
       color: '#f472b6',
@@ -228,10 +246,21 @@ export function generateLifePlays(obs: RawObs[], memory: CoreMemoryBlock[], trai
   const hasTraitId = (id: string) => traits.some(t => t.id === id);
 
   const siteV: Record<string, number> = {};
+  const contentMap2: Record<string, string[]> = {};
   for (const b of obs.filter(o => o.event_type === 'browsing-session')) {
-    const s = (b.payload.domainVisited as string) || '';
-    if (s) siteV[s] = (siteV[s] || 0) + ((b.payload.visitCount as number) || 1);
+    const domain = (b.payload.domainVisited as string) || '';
+    const slug   = (b.payload.pageSlug as string) || '';
+    if (domain) siteV[domain] = (siteV[domain] || 0) + ((b.payload.visitCount as number) || 1);
+    if (domain && slug) {
+      if (!contentMap2[domain]) contentMap2[domain] = [];
+      if (!contentMap2[domain].includes(slug)) contentMap2[domain].push(slug);
+    }
   }
+
+  const kickSlugs  = contentMap2['kick.com'] || [];
+  const twitchSlugs = contentMap2['twitch.tv'] || [];
+  const redditSubs  = contentMap2['reddit.com'] || [];
+  const ytChannels  = contentMap2['youtube.com'] || [];
 
   const apps = obs.filter(o => o.event_type === 'app-session');
   const appStats: Record<string, number> = {};
@@ -257,15 +286,47 @@ export function generateLifePlays(obs: RawObs[], memory: CoreMemoryBlock[], trai
   }
 
   // ── Play: Stream your build ──
-  if (siteV['kick.com'] >= 2 && hasTraitId('builder')) {
+  const watchingOnStream = [...kickSlugs, ...twitchSlugs];
+  if ((siteV['kick.com'] >= 2 || twitchSlugs.length > 0) && hasTraitId('builder')) {
+    const streamerRef = watchingOnStream.length > 0
+      ? `You watch ${watchingOnStream.slice(0, 2).join(' and ')} — they`
+      : 'Every streamer you watch';
     plays.push({
       id: 'stream-build',
-      title: 'Stream your build process on Kick',
-      why: `You already watch streams on Kick and you\'re building software. Developer streams have a dedicated, high-retention audience. You have both the content (your actual build) and the platform familiarity already.`,
-      action: `Set up OBS, pick one feature you\'re building this week, and stream 1 session. Don\'t overthink it — the bar is lower than you think, and Kick's algorithm rewards new streamers.`,
+      title: 'Stream your build process',
+      why: `${streamerRef} started with zero viewers. You already build software — that's the hardest part to fake. Developer streams have a high-retention niche audience that's actively looking for authentic builders.`,
+      action: `Set up OBS, pick one feature you're building this week, and stream 1 session. Don't overthink it — the bar is lower than you think, and Kick's algorithm rewards new streamers heavily.`,
       category: 'skills',
       effort: 'low',
       impact: 'high',
+    });
+  }
+
+  // ── Play: Reddit community leverage ──
+  if (redditSubs.length > 0 && hasTraitId('builder')) {
+    const sub = redditSubs[0];
+    plays.push({
+      id: `reddit-leverage-${sub}`,
+      title: `Use ${sub} as your launch pad`,
+      why: `You're already in ${sub}. That community is pre-assembled people with a shared problem — the hardest thing to build in distribution. Launching there first costs nothing and gives you real signal.`,
+      action: `Build something small that solves a top complaint in ${sub} this week. Post it there with "built this after noticing everyone complains about X." That's a 1000-person beta for free.`,
+      category: 'skills',
+      effort: 'medium',
+      impact: 'high',
+    });
+  }
+
+  // ── Play: YouTube channel patterns ──
+  if (ytChannels.length > 0 && hasTraitId('builder')) {
+    const channel = ytChannels[0];
+    plays.push({
+      id: `yt-learn-${channel}`,
+      title: `Extract the system behind ${channel}`,
+      why: `You watch ${channel}. Every successful channel has a repeatable system — a format, a cadence, a hook structure. You don't need to copy the content, just the system. Apply it to your own builds.`,
+      action: `Watch their last 3 videos with one question: what's the formula? Write it down. Then describe your work using that same formula.`,
+      category: 'skills',
+      effort: 'low',
+      impact: 'medium',
     });
   }
 

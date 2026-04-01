@@ -94,7 +94,7 @@ async function callAI(memory: CoreMemoryBlock[], prev: Thought[]): Promise<Thoug
   if (!obs?.length) return [];
 
   const appStats: Record<string, number> = {};
-  const sites: string[] = [];
+  const contentMap: Record<string, string[]> = {};
   for (const o of obs) {
     if (o.event_type === 'app-session') {
       const n = (o.payload.appName as string) || '';
@@ -102,11 +102,21 @@ async function callAI(memory: CoreMemoryBlock[], prev: Thought[]): Promise<Thoug
         appStats[n] = (appStats[n] || 0) + ((o.payload.sessionDurationSeconds as number) || 0);
     }
     if (o.event_type === 'browsing-session') {
-      const s = o.payload.domainVisited as string;
-      if (s && !sites.includes(s)) sites.push(s);
+      const domain = (o.payload.domainVisited as string) || '';
+      const slug   = (o.payload.pageSlug as string) || '';
+      if (domain && slug) {
+        if (!contentMap[domain]) contentMap[domain] = [];
+        if (!contentMap[domain].includes(slug)) contentMap[domain].push(slug);
+      }
     }
   }
   const topApps = Object.entries(appStats).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, s]) => `${n} ${Math.round(s / 60)}m`).join(', ');
+
+  // Build a human-readable content context: "Kick: adinross, nmplol | Reddit: r/chess"
+  const contentCtx = Object.entries(contentMap)
+    .map(([domain, slugs]) => `${domain.replace('www.', '')}: ${slugs.join(', ')}`)
+    .join(' | ');
+
   const memCtx = memory.map(b => `${b.label}: ${b.value}`).join('\n');
   const prevCtx = prev.slice(0, 3).map(t => `- ${t.text.slice(0, 70)}`).join('\n');
   const h = new Date().getHours();
@@ -120,11 +130,12 @@ ${memCtx || 'Still learning.'}
 PREVIOUS THOUGHTS (don't repeat these):
 ${prevCtx || 'none'}
 
-RIGHT NOW: ${tod}, apps: ${topApps || 'none'}, sites: ${sites.slice(0, 4).join(', ') || 'none'}
+RIGHT NOW: ${tod}, apps: ${topApps || 'none'}
+SPECIFIC CONTENT THEY CONSUMED: ${contentCtx || 'none'}
 
-Your job: surface ideas they have NEVER thought of. Not "you're using Chrome" — what does their behavior MEAN? What are they avoiding? What leverage are they missing? What can they do TODAY that most people won't?
+Your job: surface ideas they have NEVER thought of. Use the specific content they consumed — not just "you watch Kick" but what watching that specific person means for THEM. What are they avoiding? What leverage are they missing? What can they do TODAY that most people won't?
 
-Be specific, direct, max 2 sentences per thought. If you see chess/kick/streaming — find the opportunity. If they're building — challenge them to ship.
+Be specific, direct, max 2 sentences per thought. If they watch a specific streamer — find the signal in that choice. If they browse a subreddit — that's a distribution channel. If they're building — challenge them to ship.
 
 Reply ONLY with valid JSON array, no markdown fences:
 [{"text":"...","category":"idea","importance":"important"}]
@@ -174,23 +185,76 @@ async function generateIdeas(memory: CoreMemoryBlock[]): Promise<Thought[]> {
   const chromeMins = (appStats['Google Chrome']?.sec || 0) / 60;
   const claudeMins = (appStats['Claude']?.sec || 0) / 60;
 
+  // Build site visit counts AND a content map: domain → unique slugs seen
   const siteV: Record<string, number> = {};
+  const contentMap: Record<string, string[]> = {};   // kick.com → ['adinross', 'nmplol']
   for (const b of browsing) {
-    const s = (b.payload.domainVisited as string) || '';
-    if (s) siteV[s] = (siteV[s] || 0) + ((b.payload.visitCount as number) || 1);
+    const domain = (b.payload.domainVisited as string) || '';
+    const slug   = (b.payload.pageSlug as string) || '';
+    const visits = (b.payload.visitCount as number) || 1;
+    if (domain) siteV[domain] = (siteV[domain] || 0) + visits;
+    if (domain && slug) {
+      if (!contentMap[domain]) contentMap[domain] = [];
+      if (!contentMap[domain].includes(slug)) contentMap[domain].push(slug);
+    }
   }
   const topSites = Object.entries(siteV).sort((a, b) => b[1] - a[1]);
   const profile = memory.find(b => b.label === 'user_profile')?.value || '';
 
-  // ── Ideas ──
+  // ── Specific content: who are they watching / reading / studying? ──
+
+  // Kick streamers — surface per-streamer thought
+  for (const streamer of (contentMap['kick.com'] || [])) {
+    push(thoughts, `kick-${streamer}`,
+      `You're watching ${streamer} on Kick. Every streamer started with zero viewers. The gap between you and them isn't talent — it's the decision to start recording. You already build things. That's the most interesting stream.`,
+      'insight', 'notable');
+  }
+
+  // Twitch streamers
+  for (const streamer of (contentMap['twitch.tv'] || [])) {
+    push(thoughts, `twitch-${streamer}`,
+      `Watching ${streamer} on Twitch. You're consuming their process in real time — that's actually one of the best ways to learn craft. What's one specific thing they do that you could extract and apply?`,
+      'question', 'notable');
+  }
+
+  // YouTube channels
+  for (const channel of (contentMap['youtube.com'] || [])) {
+    push(thoughts, `yt-${channel}`,
+      `You follow ${channel} on YouTube. What's the one idea from their last video you could build or ship in a week?`,
+      'question', 'ambient');
+  }
+
+  // Reddit communities — tailor the thought to the sub
+  for (const sub of (contentMap['reddit.com'] || [])) {
+    const subName = sub.replace('r/', '');
+    if (['chess', 'learnprogramming', 'webdev', 'rust', 'typescript', 'programming'].includes(subName)) {
+      push(thoughts, `reddit-${sub}`,
+        `You browse ${sub}. The people asking questions there are your potential users. What problem shows up most often that nobody has solved cleanly?`,
+        'idea', 'notable');
+    } else {
+      push(thoughts, `reddit-${sub}`,
+        `You visit ${sub} regularly. Communities like this are latent distribution — people already assembled around a shared problem. That's hard to build from scratch.`,
+        'insight', 'ambient');
+    }
+  }
+
+  // GitHub profiles — who are they studying?
+  for (const owner of (contentMap['github.com'] || [])) {
+    push(thoughts, `gh-${owner}`,
+      `You looked at ${owner}'s GitHub. What specifically made you click on their work? That signal — the thing that made you curious — is worth writing down.`,
+      'question', 'ambient');
+  }
+
+  // ── Behavioral ideas ──
   if (chromeMins > 30 && devMins < 10)
     push(thoughts, 'consume-create', `${Math.round(chromeMins)}m browsing, ${Math.round(devMins)}m building. The internet is a read-only view of the world. You want write access.`, 'blindspot', 'important');
 
   if (siteV['www.chess.com'] >= 3 || siteV['chess.com'] >= 3)
     push(thoughts, 'chess-opp', `You keep coming back to chess. People who are obsessed with a domain AND technical are exactly who builds the tools that domain relies on — Lichess, Chess Tempo. You're already positioned.`, 'idea', 'important');
 
-  if (siteV['kick.com'] >= 2 || siteV['www.kick.com'] >= 2)
-    push(thoughts, 'kick-angle', `You watch builders on Kick. A developer who streams their own build process already has the hardest part solved — authenticity. The audience is there for people who actually ship.`, 'idea', 'notable');
+  // Generic Kick visit (no specific streamer detected yet)
+  if ((siteV['kick.com'] >= 2 || siteV['www.kick.com'] >= 2) && !(contentMap['kick.com']?.length))
+    push(thoughts, 'kick-angle', `You watch streams on Kick. A developer who streams their own build process already has the hardest part solved — authenticity. The audience is there for people who actually ship.`, 'idea', 'notable');
 
   if (claudeMins > 10)
     push(thoughts, 'claude-depth', `You use Claude but most people treat it like Google — one question, move on. The real leverage is as a thinking partner that holds your context across an entire problem. Are you doing that?`, 'question', 'notable');

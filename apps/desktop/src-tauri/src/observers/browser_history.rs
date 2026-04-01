@@ -105,6 +105,73 @@ impl BrowserHistoryObserver {
             .and_then(|u| u.host_str().map(|h| h.to_string()))
     }
 
+    /// Extract a meaningful content slug for platforms where the path tells us
+    /// *what* the user is consuming — not just where.
+    /// Examples:
+    ///   kick.com/adinross         → "adinross"
+    ///   twitch.tv/xqc             → "xqc"
+    ///   youtube.com/@fireship     → "fireship"
+    ///   youtube.com/c/Fireship    → "fireship"
+    ///   reddit.com/r/chess/...    → "r/chess"
+    ///   github.com/torvalds/linux → "torvalds"
+    ///
+    /// Returns None for homepages, search pages, or non-content paths.
+    fn extract_page_slug(url: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).ok()?;
+        let host = parsed.host_str().unwrap_or("");
+        let segments: Vec<&str> = parsed
+            .path_segments()
+            .map(|s| s.filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default();
+
+        if segments.is_empty() {
+            return None;
+        }
+
+        // ── Streaming: kick.com/streamer, twitch.tv/streamer ──────────────
+        if host.ends_with("kick.com") || host.ends_with("twitch.tv") {
+            let slug = segments[0].to_lowercase();
+            // Skip generic/non-channel paths
+            if ["dashboard", "clips", "category", "browse", "settings", "login", "signup"]
+                .contains(&slug.as_str())
+            {
+                return None;
+            }
+            return Some(slug);
+        }
+
+        // ── YouTube: /@handle, /c/Channel, /channel/UCxxx ────────────────
+        if host.ends_with("youtube.com") {
+            if segments[0].starts_with('@') {
+                return Some(segments[0].trim_start_matches('@').to_lowercase());
+            }
+            if (segments[0] == "c" || segments[0] == "user") && segments.len() >= 2 {
+                return Some(segments[1].to_lowercase());
+            }
+            // /watch URLs give a video ID — not useful without title; skip
+            return None;
+        }
+
+        // ── Reddit: /r/subreddit ──────────────────────────────────────────
+        if host.ends_with("reddit.com") && segments.len() >= 2 && segments[0] == "r" {
+            let sub = segments[1].to_lowercase();
+            return Some(format!("r/{}", sub));
+        }
+
+        // ── GitHub: /owner (skip generic paths) ───────────────────────────
+        if host.ends_with("github.com") {
+            let skip = ["login", "settings", "explore", "marketplace", "features",
+                        "topics", "trending", "collections", "pulls", "issues",
+                        "notifications", "orgs", "users"];
+            if !skip.contains(&segments[0]) {
+                return Some(segments[0].to_lowercase());
+            }
+            return None;
+        }
+
+        None
+    }
+
     /// SHA-256 hash of the URL for dedup source_id
     fn hash_url(url: &str) -> String {
         let mut hasher = Sha256::new();
@@ -141,22 +208,38 @@ impl Observer for BrowserHistoryObserver {
 
         let entries = self.read_chrome_history(since);
 
-        // Aggregate by domain: count visits and track time range
-        let mut domain_stats: HashMap<String, (u32, i64)> = HashMap::new();
+        // Aggregate by (domain, page_slug): count visits and track latest timestamp.
+        // Key: "<domain>" or "<domain>/<slug>" when a meaningful slug exists.
+        let mut domain_stats: HashMap<String, (String, Option<String>, u32, i64)> = HashMap::new();
         for (url, ts) in &entries {
             if let Some(domain) = Self::extract_domain(url) {
-                let entry = domain_stats.entry(domain).or_insert((0, *ts));
-                entry.0 += 1;
-                if *ts > entry.1 {
-                    entry.1 = *ts;
+                let slug = Self::extract_page_slug(url);
+                let key = match &slug {
+                    Some(s) => format!("{}/{}", domain, s),
+                    None => domain.clone(),
+                };
+                let entry = domain_stats.entry(key).or_insert((domain, slug, 0, *ts));
+                entry.2 += 1;
+                if *ts > entry.3 {
+                    entry.3 = *ts;
                 }
             }
         }
 
         domain_stats
             .into_iter()
-            .map(|(domain, (count, latest_ts))| {
-                let source_id = format!("browse:{}:{}", domain, since);
+            .map(|(_key, (domain, slug, count, latest_ts))| {
+                let source_id = format!("browse:{}:{}:{}", domain, slug.as_deref().unwrap_or(""), since);
+                let mut payload = json!({
+                    "domain": "mind",
+                    "subtype": "browsing-session",
+                    "domainVisited": domain,
+                    "visitCount": count,
+                });
+                // Attach slug only when present — keeps payload lean for homepage visits
+                if let Some(ref s) = slug {
+                    payload["pageSlug"] = json!(s);
+                }
                 ObserverEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     source: "macos-browser".to_string(),
@@ -165,12 +248,7 @@ impl Observer for BrowserHistoryObserver {
                     event_type: "browsing-session".to_string(),
                     timestamp: latest_ts,
                     ingested_at: now,
-                    payload: json!({
-                        "domain": "mind",
-                        "subtype": "browsing-session",
-                        "domainVisited": domain,
-                        "visitCount": count,
-                    }),
+                    payload,
                     privacy_level: "private".to_string(),
                     confidence: 1.0,
                 }
