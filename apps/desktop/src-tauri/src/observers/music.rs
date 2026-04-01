@@ -34,31 +34,35 @@ impl MusicObserver {
 
     #[cfg(target_os = "macos")]
     fn get_now_playing(&self) -> Option<NowPlaying> {
-        // Use AppleScript via osascript as a reliable fallback.
-        // The MediaRemote framework requires private API access and is fragile.
+        // IMPORTANT: Only query apps that are ALREADY running.
+        // "tell application X" without an "is running" guard LAUNCHES the app.
         let output = std::process::Command::new("osascript")
             .args([
                 "-e",
                 r#"
                 try
-                    tell application "Music"
-                        if player state is playing then
-                            set t to name of current track
-                            set a to artist of current track
-                            set al to album of current track
-                            return t & "|||" & a & "|||" & al
-                        end if
-                    end tell
+                    if application "Music" is running then
+                        tell application "Music"
+                            if player state is playing then
+                                set t to name of current track
+                                set a to artist of current track
+                                set al to album of current track
+                                return t & "|||" & a & "|||" & al
+                            end if
+                        end tell
+                    end if
                 end try
                 try
-                    tell application "Spotify"
-                        if player state is playing then
-                            set t to name of current track
-                            set a to artist of current track
-                            set al to album of current track
-                            return t & "|||" & a & "|||" & al
-                        end if
-                    end tell
+                    if application "Spotify" is running then
+                        tell application "Spotify"
+                            if player state is playing then
+                                set t to name of current track
+                                set a to artist of current track
+                                set al to album of current track
+                                return t & "|||" & a & "|||" & al
+                            end if
+                        end tell
+                    end if
                 end try
                 return ""
                 "#,
