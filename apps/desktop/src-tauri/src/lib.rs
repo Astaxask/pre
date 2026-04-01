@@ -1034,7 +1034,7 @@ pub fn run() {
         ])
         .setup(|app| {
             // ── Command-input window (hidden, shown on tray click) ───────
-            let _cmd_win = WebviewWindowBuilder::new(
+            let cmd_win = WebviewWindowBuilder::new(
                 app,
                 "command-input",
                 tauri::WebviewUrl::App("index.html".into()),
@@ -1046,8 +1046,37 @@ pub fn run() {
             .inner_size(560.0, 148.0)
             .resizable(false)
             .skip_taskbar(true)
-            .transparent(true)
             .build()?;
+
+            // Make the command-input float above fullscreen apps and all Spaces.
+            #[cfg(target_os = "macos")]
+            {
+                use objc2_app_kit::NSWindow;
+                use objc2::rc::Retained;
+
+                let ns_win: Retained<NSWindow> = unsafe {
+                    let ptr = cmd_win.ns_window()
+                        .expect("failed to get NSWindow") as *mut NSWindow;
+                    Retained::retain(ptr).expect("NSWindow pointer was null")
+                };
+
+                unsafe {
+                    // Transparent background so the floating card shows
+                    // with real rounded corners (no opaque rectangle).
+                    let _: () = objc2::msg_send![&*ns_win, setOpaque: false];
+                    let _: () = objc2::msg_send![&*ns_win, setBackgroundColor: std::ptr::null::<objc2::runtime::NSObject>()];
+
+                    // Level 25 = CGShieldingWindowLevel — above everything
+                    // including fullscreen apps.
+                    ns_win.setLevel(25);
+
+                    // Bits: canJoinAllSpaces (0) | fullScreenAuxiliary (8) | stationary (4)
+                    // This makes the window visible on every Space and
+                    // alongside fullscreen apps without being displaced.
+                    let behavior: usize = (1 << 0) | (1 << 8) | (1 << 4);
+                    let _: () = objc2::msg_send![&*ns_win, setCollectionBehavior: behavior];
+                }
+            }
 
             // ── Tray icon ────────────────────────────────────────────────
             let idle_image = tauri::image::Image::from_bytes(ICON_IDLE)

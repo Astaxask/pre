@@ -80,12 +80,9 @@ export function CommandInput() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') inv('close_command_input');
     };
-    const onBlur = () => setTimeout(() => inv('close_command_input'), 120);
     window.addEventListener('keydown', onKey);
-    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('blur', onBlur);
     };
   }, []);
 
