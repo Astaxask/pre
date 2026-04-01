@@ -4,129 +4,77 @@
 
 @layer base {
   :root {
-    --color-surface: #0a0a0a;
-    --color-surface-raised: #141414;
-    --color-surface-sunken: #050505;
-    --color-text-primary: #e8e8e4;
-    --color-text-secondary: #8a8a86;
-    --color-text-tertiary: #4a4a46;
-    --color-border: rgba(255, 255, 255, 0.06);
-    --color-accent: #7b9aff;
-    --color-positive: #4ade80;
-    --color-negative: #f87171;
-    --color-warning: #fbbf24;
-    --color-neutral-trend: #6b6b68;
-    --color-thought-glow: rgba(123, 154, 255, 0.08);
-    --color-insight-glow: rgba(251, 191, 36, 0.06);
+    --bg: #0f0f10;
+    --bg-raised: #161618;
+    --bg-overlay: #1c1c1f;
+    --text-primary: #f2f2f0;
+    --text-secondary: #a0a09c;
+    --text-muted: #585854;
+    --text-faint: #333330;
+    --border: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --accent: #7c9fff;
+
+    /* Category colors — vivid enough to distinguish at a glance */
+    --cat-idea: #7c9fff;
+    --cat-blindspot: #ff6b6b;
+    --cat-question: #ffd93d;
+    --cat-challenge: #ff9f43;
+    --cat-insight: #c084fc;
+    --cat-prediction: #4ade80;
+    --cat-pattern: #a78bfa;
+    --cat-nudge: #f472b6;
+    --cat-reflection: #8a8a86;
+    --cat-plan: #38bdf8;
+    --cat-memory: #94a3b8;
   }
 
-  * {
-    box-sizing: border-box;
-  }
+  *, *::before, *::after { box-sizing: border-box; }
 
-  body {
-    margin: 0;
-    padding: 0;
-    background: var(--color-surface);
-    color: var(--color-text-primary);
-    font-family: 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow: hidden;
-    letter-spacing: -0.01em;
   }
 
-  /* Custom scrollbar */
-  .overflow-y-auto::-webkit-scrollbar {
-    width: 3px;
-  }
-  .overflow-y-auto::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .overflow-y-auto::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: 3px;
-  }
-  .overflow-y-auto::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.12);
-  }
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.16); }
 
-  /* Thought entry animations */
-  @keyframes thought-appear {
-    from {
-      opacity: 0;
-      transform: translateY(8px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
+  /* Selection */
+  ::selection { background: rgba(124,159,255,0.25); color: var(--text-primary); }
 
-  @keyframes pulse-subtle {
-    0%, 100% { opacity: 0.4; }
-    50% { opacity: 1; }
-  }
-
-  @keyframes thinking-dots {
-    0%, 20% { content: '.'; }
-    40% { content: '..'; }
-    60%, 100% { content: '...'; }
-  }
-
-  @keyframes glow-breathe {
-    0%, 100% {
-      box-shadow: 0 0 0 0 rgba(123, 154, 255, 0);
-    }
-    50% {
-      box-shadow: 0 0 20px 2px rgba(123, 154, 255, 0.05);
-    }
+  /* ── Animations ── */
+  @keyframes slide-up {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 
   @keyframes fade-in {
     from { opacity: 0; }
-    to { opacity: 1; }
+    to   { opacity: 1; }
   }
 
-  .thought-enter {
-    animation: thought-appear 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50%       { opacity: 1;   transform: scale(1.15); }
   }
 
-  .pulse-alive {
-    animation: pulse-subtle 3s ease-in-out infinite;
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(124,159,255,0); }
+    50%       { box-shadow: 0 0 14px 3px rgba(124,159,255,0.1); }
   }
 
-  .glow-breathe {
-    animation: glow-breathe 4s ease-in-out infinite;
-  }
-
-  .fade-in {
-    animation: fade-in 0.4s ease-out forwards;
-  }
-
-  /* Typing cursor effect */
-  .typing-cursor::after {
-    content: '|';
-    animation: pulse-subtle 1s ease-in-out infinite;
-    color: var(--color-accent);
-    font-weight: 200;
-    margin-left: 1px;
-  }
-
-  /* Gradient mask for scroll fade */
-  .scroll-fade-top {
-    mask-image: linear-gradient(to bottom, transparent, black 24px);
-    -webkit-mask-image: linear-gradient(to bottom, transparent, black 24px);
-  }
-
-  .scroll-fade-bottom {
-    mask-image: linear-gradient(to top, transparent, black 24px);
-    -webkit-mask-image: linear-gradient(to top, transparent, black 24px);
-  }
-
-  /* Selection */
-  ::selection {
-    background: rgba(123, 154, 255, 0.2);
-    color: var(--color-text-primary);
-  }
+  .thought-enter { animation: slide-up 0.5s cubic-bezier(0.16,1,0.3,1) both; }
+  .fade-in       { animation: fade-in 0.3s ease both; }
+  .pulse-dot     { animation: pulse-dot 1.6s ease-in-out infinite; }
+  .breathe       { animation: breathe 4s ease-in-out infinite; }
 }

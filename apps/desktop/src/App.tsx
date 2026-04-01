@@ -4,13 +4,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // Tauri interop
 // ---------------------------------------------------------------------------
 
-let invokeImpl: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
+let _invoke: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
 async function getInvoke() {
-  if (invokeImpl) return invokeImpl;
-  try { const m = await import('@tauri-apps/api/core'); invokeImpl = m.invoke; return invokeImpl; }
-  catch { invokeImpl = async () => []; return invokeImpl!; }
+  if (_invoke) return _invoke;
+  try { const m = await import('@tauri-apps/api/core'); _invoke = m.invoke; return _invoke; }
+  catch { _invoke = async () => []; return _invoke!; }
 }
-async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
+async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T | null> {
   try { return (await (await getInvoke())(cmd, args)) as T; } catch { return null; }
 }
 
@@ -18,10 +18,15 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 // Types
 // ---------------------------------------------------------------------------
 
+type Category =
+  | 'idea' | 'blindspot' | 'question' | 'challenge'
+  | 'insight' | 'prediction' | 'pattern' | 'nudge'
+  | 'reflection' | 'plan' | 'memory';
+
 type Thought = {
   id: string;
   text: string;
-  category: 'idea' | 'blindspot' | 'question' | 'pattern' | 'challenge' | 'insight' | 'reflection' | 'nudge' | 'prediction' | 'plan' | 'memory';
+  category: Category;
   importance: 'ambient' | 'notable' | 'important';
   timestamp: number;
   isNew?: boolean;
@@ -30,331 +35,218 @@ type Thought = {
 };
 
 type CoreMemoryBlock = { label: string; value: string; updatedAt: number; version: number };
-
-type RawObservation = {
-  id: string; source: string; domain: string;
-  event_type: string; timestamp: number;
-  payload: Record<string, unknown>;
-};
-
-type ObserverInfo = {
-  name: string; enabled: boolean; available: boolean;
-  last_collection: number | null; events_collected: number;
-};
-
+type RawObs = { id: string; event_type: string; timestamp: number; payload: Record<string, unknown>; };
+type ObserverInfo = { name: string; enabled: boolean; available: boolean; last_collection: number | null; events_collected: number; };
 type Tab = 'stream' | 'memory';
 
 // ---------------------------------------------------------------------------
-// Persistent memory helpers
+// Category metadata — vivid, clearly differentiated
 // ---------------------------------------------------------------------------
 
-const shownTemplates = new Map<string, { text: string; timestamp: number }>();
+const CAT: Record<Category, { label: string; color: string; bg: string }> = {
+  idea:       { label: 'idea',       color: '#7c9fff', bg: 'rgba(124,159,255,0.13)' },
+  blindspot:  { label: 'blind spot', color: '#ff6b6b', bg: 'rgba(255,107,107,0.13)' },
+  question:   { label: 'question',   color: '#ffd93d', bg: 'rgba(255,217,61,0.13)'  },
+  challenge:  { label: 'challenge',  color: '#ff9f43', bg: 'rgba(255,159,67,0.13)'  },
+  insight:    { label: 'insight',    color: '#c084fc', bg: 'rgba(192,132,252,0.13)' },
+  prediction: { label: 'prediction', color: '#4ade80', bg: 'rgba(74,222,128,0.13)'  },
+  pattern:    { label: 'pattern',    color: '#a78bfa', bg: 'rgba(167,139,250,0.13)' },
+  nudge:      { label: 'nudge',      color: '#f472b6', bg: 'rgba(244,114,182,0.13)' },
+  reflection: { label: 'reflection', color: '#94a3b8', bg: 'rgba(148,163,184,0.11)' },
+  plan:       { label: 'plan',       color: '#38bdf8', bg: 'rgba(56,189,248,0.13)'  },
+  memory:     { label: 'memory',     color: '#e2e8f0', bg: 'rgba(226,232,240,0.08)' },
+};
 
-function shouldShow(key: string, newText: string): boolean {
-  const prev = shownTemplates.get(key);
-  if (!prev) return true;
-  if (Date.now() - prev.timestamp < 300_000) return false;
-  const normalize = (s: string) => s.replace(/\d+/g, '#').toLowerCase();
-  return normalize(newText) !== normalize(prev.text);
+// ---------------------------------------------------------------------------
+// Memory helpers
+// ---------------------------------------------------------------------------
+
+const seenKeys = new Map<string, { text: string; ts: number }>();
+
+function canShow(key: string, text: string): boolean {
+  const p = seenKeys.get(key);
+  if (!p) return true;
+  if (Date.now() - p.ts < 300_000) return false;
+  const n = (s: string) => s.replace(/\d+/g, '#').toLowerCase().slice(0, 60);
+  return n(text) !== n(p.text);
 }
+function markSeen(key: string, text: string) { seenKeys.set(key, { text, ts: Date.now() }); }
 
-function markShown(key: string, text: string) {
-  shownTemplates.set(key, { text, timestamp: Date.now() });
+async function persistThoughts(ts: Thought[]) {
+  if (!ts.length) return;
+  await inv('save_thoughts', { thoughts: ts.map(t => ({ id: t.id, text: t.text, category: t.category, importance: t.importance, source: t.source, templateKey: t.templateKey })) });
 }
-
-async function persistThoughts(thoughts: Thought[]) {
-  if (!thoughts.length) return;
-  await tauriInvoke('save_thoughts', { thoughts: thoughts.map(t => ({
-    id: t.id, text: t.text, category: t.category,
-    importance: t.importance, source: t.source, templateKey: t.templateKey,
-  })) });
-}
-
-async function loadPersistedThoughts(): Promise<Thought[]> {
-  const raw = await tauriInvoke<Array<{
-    id: string; text: string; category: string; importance: string;
-    source: string; templateKey: string; timestamp: number;
-  }>>('load_thoughts', { limit: 40 });
+async function loadSaved(): Promise<Thought[]> {
+  const raw = await inv<Array<{ id: string; text: string; category: string; importance: string; source: string; templateKey: string; timestamp: number; }>>('load_thoughts', { limit: 40 });
   if (!raw?.length) return [];
-  return raw.map(t => ({
-    id: t.id, text: t.text,
-    category: (t.category as Thought['category']) || 'reflection',
-    importance: (t.importance as Thought['importance']) || 'ambient',
-    timestamp: t.timestamp, isNew: false,
-    source: (t.source as Thought['source']) || 'local',
-    templateKey: t.templateKey,
+  return raw.map(t => ({ id: t.id, text: t.text, category: (t.category as Category) || 'reflection', importance: (t.importance as Thought['importance']) || 'ambient', timestamp: t.timestamp, isNew: false, source: (t.source as Thought['source']) || 'local', templateKey: t.templateKey }));
+}
+async function loadMemory(): Promise<CoreMemoryBlock[]> { return (await inv<CoreMemoryBlock[]>('load_core_memory')) ?? []; }
+async function saveMemory(label: string, value: string) { await inv('save_core_memory', { label, value }); }
+
+// ---------------------------------------------------------------------------
+// AI call
+// ---------------------------------------------------------------------------
+
+async function callAI(memory: CoreMemoryBlock[], prev: Thought[]): Promise<Thought[]> {
+  const obs = await inv<RawObs[]>('get_recent_observations', { limit: 20 });
+  if (!obs?.length) return [];
+
+  const appStats: Record<string, number> = {};
+  const sites: string[] = [];
+  for (const o of obs) {
+    if (o.event_type === 'app-session') {
+      const n = (o.payload.appName as string) || '';
+      if (n && !['WindowManager', 'Finder', 'loginwindow', 'UserNotificationCenter'].includes(n))
+        appStats[n] = (appStats[n] || 0) + ((o.payload.sessionDurationSeconds as number) || 0);
+    }
+    if (o.event_type === 'browsing-session') {
+      const s = o.payload.domainVisited as string;
+      if (s && !sites.includes(s)) sites.push(s);
+    }
+  }
+  const topApps = Object.entries(appStats).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, s]) => `${n} ${Math.round(s / 60)}m`).join(', ');
+  const memCtx = memory.map(b => `${b.label}: ${b.value}`).join('\n');
+  const prevCtx = prev.slice(0, 3).map(t => `- ${t.text.slice(0, 70)}`).join('\n');
+  const h = new Date().getHours();
+  const tod = h < 6 ? 'late night' : h < 12 ? 'morning' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
+
+  const prompt = `You are PRE — a brutally honest life strategist with full memory of this person.
+
+WHAT YOU KNOW:
+${memCtx || 'Still learning.'}
+
+PREVIOUS THOUGHTS (don't repeat these):
+${prevCtx || 'none'}
+
+RIGHT NOW: ${tod}, apps: ${topApps || 'none'}, sites: ${sites.slice(0, 4).join(', ') || 'none'}
+
+Your job: surface ideas they have NEVER thought of. Not "you're using Chrome" — what does their behavior MEAN? What are they avoiding? What leverage are they missing? What can they do TODAY that most people won't?
+
+Be specific, direct, max 2 sentences per thought. If you see chess/kick/streaming — find the opportunity. If they're building — challenge them to ship.
+
+Reply ONLY with valid JSON array, no markdown fences:
+[{"text":"...","category":"idea","importance":"important"}]
+Valid categories: idea, blindspot, question, challenge, insight, prediction
+Valid importance: notable, important`;
+
+  const raw = await inv<Array<{ text: string; category?: string; importance?: string }>>('generate_ai_thoughts', { limit: 20, customPrompt: prompt });
+  return (raw ?? []).filter(t => t.text).map(t => ({
+    id: crypto.randomUUID(), text: t.text,
+    category: (t.category as Category) || 'insight',
+    importance: (t.importance as Thought['importance']) || 'notable',
+    timestamp: Date.now(), isNew: true, source: 'ai' as const,
+    templateKey: `ai-${t.text.slice(0, 50).replace(/\d+/g, '#')}`,
   }));
 }
 
-async function saveCoreMemory(label: string, value: string) {
-  await tauriInvoke('save_core_memory', { label, value });
-}
-
-async function loadCoreMemory(): Promise<CoreMemoryBlock[]> {
-  return (await tauriInvoke<CoreMemoryBlock[]>('load_core_memory')) ?? [];
-}
-
 // ---------------------------------------------------------------------------
-// AI Engine — calls Ollama with life-strategist framing
+// Local idea engine
 // ---------------------------------------------------------------------------
 
-async function callAI(coreMemory: CoreMemoryBlock[], prevThoughts: Thought[]): Promise<Thought[]> {
-  try {
-    const obs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 20 });
-    if (!obs?.length) return [];
-
-    // Build compact activity summary
-    const appStats: Record<string, number> = {};
-    const sites: string[] = [];
-    for (const o of obs) {
-      if (o.event_type === 'app-session') {
-        const name = (o.payload.appName as string) || '';
-        if (name && name !== 'WindowManager' && name !== 'Finder') {
-          appStats[name] = (appStats[name] || 0) + ((o.payload.sessionDurationSeconds as number) || 0);
-        }
-      }
-      if (o.event_type === 'browsing-session') {
-        const site = o.payload.domainVisited as string;
-        if (site && !sites.includes(site)) sites.push(site);
-      }
-    }
-
-    const topApps = Object.entries(appStats).sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([n, s]) => `${n} ${Math.round(s/60)}min`).join(', ');
-
-    const memCtx = coreMemory.length
-      ? coreMemory.map(b => `${b.label}: ${b.value}`).join('\n')
-      : '';
-
-    const prevCtx = prevThoughts.slice(0, 4)
-      .map(t => `- ${t.text.slice(0, 80)}`).join('\n');
-
-    const h = new Date().getHours();
-    const timeOfDay = h < 6 ? 'late night' : h < 12 ? 'morning' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
-
-    const prompt = `You are PRE — a brutally honest life strategist with infinite memory. You know this person deeply. Your job is NOT to describe what they're doing. Your job is to surface ideas they've never thought of, blind spots they're missing, and provocative questions that could change something.
-
-WHAT YOU KNOW:
-${memCtx || 'Still learning about this person.'}
-
-PREVIOUS THOUGHTS (don't repeat):
-${prevCtx || 'none yet'}
-
-RIGHT NOW: ${timeOfDay}, apps: ${topApps || 'no data'}, sites: ${sites.slice(0, 4).join(', ') || 'none'}
-
-RULES:
-- Never describe what they're doing. They know what they're doing.
-- Instead: what does their behavior MEAN? What are they avoiding? What opportunity are they missing?
-- Connect dots they haven't connected: chess + coding + late nights = ?
-- Give one surprising, specific idea they could act on TODAY
-- Be direct. No fluff. Max 2 sentences per thought.
-- If you see chess.com, kick.com, or similar — what does that say about their interests and how could they monetize or level-up that passion?
-
-Reply ONLY with JSON array:
-[{"text":"...","category":"idea","importance":"important"}]
-Categories: idea, blindspot, question, challenge, insight, prediction
-Importance: notable, important`;
-
-    const raw = await tauriInvoke<Array<{ text: string; category?: string; importance?: string }>>('generate_ai_thoughts', { limit: 20, customPrompt: prompt });
-
-    if (!raw?.length) return [];
-    return raw.filter(t => t.text).map(t => ({
-      id: crypto.randomUUID(),
-      text: t.text,
-      category: (t.category as Thought['category']) || 'insight',
-      importance: (t.importance as Thought['importance']) || 'notable',
-      timestamp: Date.now(),
-      isNew: true,
-      source: 'ai' as const,
-      templateKey: `ai-${t.text.slice(0, 50).replace(/\d+/g, '#')}`,
-    }));
-  } catch { return []; }
-}
-
-// ---------------------------------------------------------------------------
-// Idea engine — provocations, not observations
-// ---------------------------------------------------------------------------
-
-async function generateIdeas(coreMemory: CoreMemoryBlock[]): Promise<Thought[]> {
-  const obs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 100 });
+async function generateIdeas(memory: CoreMemoryBlock[]): Promise<Thought[]> {
+  const obs = await inv<RawObs[]>('get_recent_observations', { limit: 100 });
   if (!obs?.length) return [];
 
   const thoughts: Thought[] = [];
   const now = Date.now();
   const hour = new Date().getHours();
-  const dayOfWeek = new Date().getDay();
+  const dow = new Date().getDay();
 
-  // ── Parse observations ──
   const apps = obs.filter(o => o.event_type === 'app-session');
   const browsing = obs.filter(o => o.event_type === 'browsing-session');
 
-  const appStats: Record<string, { totalSec: number; count: number }> = {};
+  const appStats: Record<string, { sec: number; count: number }> = {};
   for (const s of apps) {
-    const name = (s.payload.appName as string) || '';
-    if (!name || ['WindowManager', 'Finder', 'loginwindow', 'UserNotificationCenter'].includes(name)) continue;
-    const secs = (s.payload.sessionDurationSeconds as number) || 0;
-    if (!appStats[name]) appStats[name] = { totalSec: 0, count: 0 };
-    appStats[name].totalSec += secs;
-    appStats[name].count += 1;
+    const n = (s.payload.appName as string) || '';
+    if (!n || ['WindowManager', 'Finder', 'loginwindow', 'UserNotificationCenter'].includes(n)) continue;
+    const sec = (s.payload.sessionDurationSeconds as number) || 0;
+    if (!appStats[n]) appStats[n] = { sec: 0, count: 0 };
+    appStats[n].sec += sec; appStats[n].count++;
   }
 
-  const sorted = Object.entries(appStats).sort((a, b) => b[1].totalSec - a[1].totalSec);
-  const totalMins = sorted.reduce((s, [, d]) => s + d.totalSec, 0) / 60;
-
-  const siteVisits: Record<string, number> = {};
-  for (const b of browsing) {
-    const site = (b.payload.domainVisited as string) || '';
-    if (site) siteVisits[site] = (siteVisits[site] || 0) + ((b.payload.visitCount as number) || 1);
-  }
-  const topSites = Object.entries(siteVisits).sort((a, b) => b[1] - a[1]);
-
-  // ── Classify apps ──
+  const sorted = Object.entries(appStats).sort((a, b) => b[1].sec - a[1].sec);
+  const totalMins = sorted.reduce((s, [, d]) => s + d.sec, 0) / 60;
   const devApps = ['Cursor', 'VS Code', 'Code', 'Terminal', 'iTerm2', 'Xcode'];
   const isBuilder = sorted.some(([n]) => devApps.some(d => n.includes(d)));
-  const devMins = sorted.filter(([n]) => devApps.some(d => n.includes(d))).reduce((s, [, d]) => s + d.totalSec, 0) / 60;
-  const chromeMins = (appStats['Google Chrome']?.totalSec || 0) / 60;
-  const claudeMins = (appStats['Claude']?.totalSec || 0) / 60;
+  const devMins = sorted.filter(([n]) => devApps.some(d => n.includes(d))).reduce((s, [, d]) => s + d.sec, 0) / 60;
+  const chromeMins = (appStats['Google Chrome']?.sec || 0) / 60;
+  const claudeMins = (appStats['Claude']?.sec || 0) / 60;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // IDEAS — not observations. Provocations. Blind spots. Opportunities.
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // Idea: Chrome vs creation imbalance
-  if (chromeMins > 30 && devMins < 10) {
-    emit(thoughts, 'idea-browser-vs-build',
-      `${Math.round(chromeMins)} minutes browsing, ${Math.round(devMins)} building. The internet is a read-only version of the world — you want the write access.`,
-      'blindspot', 'important');
+  const siteV: Record<string, number> = {};
+  for (const b of browsing) {
+    const s = (b.payload.domainVisited as string) || '';
+    if (s) siteV[s] = (siteV[s] || 0) + ((b.payload.visitCount as number) || 1);
   }
+  const topSites = Object.entries(siteV).sort((a, b) => b[1] - a[1]);
+  const profile = memory.find(b => b.label === 'user_profile')?.value || '';
 
-  // Idea: Chess.com pattern — competitive intelligence
-  if (siteVisits['www.chess.com'] >= 3 || siteVisits['chess.com'] >= 3) {
-    emit(thoughts, 'idea-chess-pattern',
-      `You keep returning to chess. Chess players who build tools for chess communities have built real businesses — Lichess, Chess Tempo, countless bots. You're already obsessed with the domain.`,
-      'idea', 'important');
-  }
+  // ── Ideas ──
+  if (chromeMins > 30 && devMins < 10)
+    push(thoughts, 'consume-create', `${Math.round(chromeMins)}m browsing, ${Math.round(devMins)}m building. The internet is a read-only view of the world. You want write access.`, 'blindspot', 'important');
 
-  // Idea: kick.com — content creation angle
-  if (siteVisits['kick.com'] >= 2) {
-    emit(thoughts, 'idea-kick-content',
-      `You watch on Kick but you're also building software. A developer who streams their build process has a built-in audience — technical people are the most loyal viewers.`,
-      'idea', 'notable');
-  }
+  if (siteV['www.chess.com'] >= 3 || siteV['chess.com'] >= 3)
+    push(thoughts, 'chess-opp', `You keep coming back to chess. People who are obsessed with a domain AND technical are exactly who builds the tools that domain relies on — Lichess, Chess Tempo. You're already positioned.`, 'idea', 'important');
 
-  // Idea: Claude usage — what are you actually using it for?
-  if (claudeMins > 10) {
-    emit(thoughts, 'idea-claude-leverage',
-      `You're spending time with Claude. Most people use it reactively — for one-off answers. The 1% use it to externalise their entire thinking process. Are you in the 1%?`,
-      'question', 'notable');
-  }
+  if (siteV['kick.com'] >= 2 || siteV['www.kick.com'] >= 2)
+    push(thoughts, 'kick-angle', `You watch builders on Kick. A developer who streams their own build process already has the hardest part solved — authenticity. The audience is there for people who actually ship.`, 'idea', 'notable');
 
-  // Idea: Builder with no shipping signal
-  if (isBuilder && devMins > 20) {
-    emit(thoughts, 'idea-shipping',
-      `You're writing code. The most dangerous phase is when you've been building long enough to have something, but haven't shipped it to a single real user yet. Is that where you are?`,
-      'challenge', 'important');
-  }
+  if (claudeMins > 10)
+    push(thoughts, 'claude-depth', `You use Claude but most people treat it like Google — one question, move on. The real leverage is as a thinking partner that holds your context across an entire problem. Are you doing that?`, 'question', 'notable');
 
-  // Idea: Morning time use
-  if (hour >= 6 && hour < 10 && totalMins > 10) {
-    emit(thoughts, 'idea-morning-capital',
-      `Morning is when your dopamine baseline is highest and your resistance to difficult tasks is lowest. Most people waste it on email. You have 2 hours of premium cognitive time right now.`,
-      'idea', 'important');
-  }
+  if (isBuilder && devMins > 20)
+    push(thoughts, 'ship-signal', `You're writing code. The most dangerous phase is having something real but not yet in front of real users. Every day in stealth is a day without signal.`, 'challenge', 'important');
 
-  // Idea: Weekend leverage
-  if ((dayOfWeek === 0 || dayOfWeek === 6) && isBuilder) {
-    emit(thoughts, 'idea-weekend-asymmetry',
-      `You're building on a weekend. 95% of people are not. This is where leverage comes from — not working harder during the week, but doing something on Saturday that others won't do.`,
-      'insight', 'notable');
-  }
+  if (hour >= 6 && hour < 10 && totalMins > 5)
+    push(thoughts, 'morning-window', `You have the highest cognitive bandwidth of your day right now. Protect the next 2 hours like they're your scarcest resource — because they are.`, 'idea', 'important');
 
-  // Idea: Switching = unprocessed decisions
-  const recent10m = apps.filter(a => now - a.timestamp < 600_000);
-  if (recent10m.length > 10) {
-    emit(thoughts, 'idea-switching-cost',
-      `Rapid context switching is usually a symptom of an unmade decision. What are you avoiding deciding right now?`,
-      'question', 'notable');
-  }
+  if ((dow === 0 || dow === 6) && isBuilder)
+    push(thoughts, 'weekend-edge', `Building on a weekend puts you in a category most people aren't in. That asymmetry is the actual moat — not the code.`, 'insight', 'notable');
 
-  // Idea: Deep focus = monetisable skill
-  const recent10mSwitches = recent10m.length;
-  if (recent10mSwitches <= 3 && totalMins > 20) {
-    emit(thoughts, 'idea-focus-rare',
-      `You just sustained deep focus for an extended period. That's genuinely rare. The ability to concentrate is becoming one of the most economically valuable skills — protect it like an asset.`,
-      'insight', 'notable');
-  }
+  const recent = apps.filter(a => now - a.timestamp < 600_000);
+  if (recent.length > 10)
+    push(thoughts, 'scattered', `${recent.length} context switches in 10 minutes. Rapid switching is almost always a symptom of an unmade decision. What are you circling around?`, 'question', 'notable');
+  else if (recent.length <= 3 && totalMins > 20)
+    push(thoughts, 'rare-focus', `You've been in deep focus for a while. The ability to sustain concentration is genuinely becoming rare and economically valuable. Treat it like a compounding asset.`, 'insight', 'notable');
 
-  // Idea: Site obsession = unresolved question
-  const fixatedSite = topSites.find(([, v]) => v >= 8);
-  if (fixatedSite) {
-    const [site] = fixatedSite;
-    const clean = site.replace('www.', '');
-    emit(thoughts, 'idea-site-fixation',
-      `${fixatedSite[1]} visits to ${clean}. Obsessive return-visits usually mean one thing: you have a question you haven't asked out loud yet. What is it?`,
-      'blindspot', 'notable');
-  }
+  const fixated = topSites.find(([, v]) => v >= 8);
+  if (fixated)
+    push(thoughts, 'fixation', `${fixated[1]} visits to ${fixated[0].replace('www.', '')} today. Obsessive return-visits usually mean one thing: a question you haven't articulated yet. What is it?`, 'blindspot', 'notable');
 
-  // Idea: Late night compound effect
-  if (hour >= 23 || hour < 4) {
-    emit(thoughts, 'idea-latenight',
-      `Every hour past midnight costs you more than it gives — compounding sleep debt reduces your effective IQ by up to 20 points the next day. Your best decisions won't happen tonight.`,
-      'challenge', 'important');
-  }
+  if (hour >= 23 || hour < 4)
+    push(thoughts, 'late-cost', `Every hour past midnight compounds into tomorrow's deficit. Sleep deprivation reduces effective reasoning by ~20%. Your best decisions aren't happening tonight.`, 'challenge', 'important');
 
-  // Idea: The unseen opportunity cost
-  if (totalMins > 60 && !isBuilder) {
-    emit(thoughts, 'idea-opportunity-cost',
-      `An hour a day of deliberate skill-building compounds to 365 hours a year — roughly the equivalent of a university semester. What skill, if you had it, would change everything?`,
-      'idea', 'notable');
-  }
+  if (totalMins > 60 && !isBuilder)
+    push(thoughts, 'skill-compound', `One focused hour per day compounds to a full university semester of skill in a year. What would change everything if you had it?`, 'idea', 'notable');
 
-  // Idea: Research without synthesis
-  const uniqueSites = Object.keys(siteVisits).length;
-  if (uniqueSites >= 6) {
-    emit(thoughts, 'idea-research-synthesis',
-      `You've been across ${uniqueSites} sites. Research without capture is just entertainment — you'll remember about 10% of it by tomorrow. Even two sentences of notes would 10x the return.`,
-      'nudge', 'notable');
-  }
+  if (Object.keys(siteV).length >= 6)
+    push(thoughts, 'research-capture', `${Object.keys(siteV).length} sites browsed. Without capture, you'll retain about 10% by tomorrow. Two sentences of notes would 10x that.`, 'nudge', 'notable');
 
-  // Idea: From core memory — identify interests and push further
-  const profile = coreMemory.find(b => b.label === 'user_profile')?.value || '';
-  if (profile.includes('chess') && isBuilder) {
-    emit(thoughts, 'idea-chess-builder',
-      `A developer who loves chess and is building software: you're sitting on a specific niche. The world's best chess tools are built by people who are passionate about the game AND technical. That's rare.`,
-      'idea', 'important');
-  }
+  if (profile.includes('chess') && isBuilder)
+    push(thoughts, 'chess-builder', `Chess obsession + software skills is a rare combination. The best tools in any domain are built by people who are both passionate users AND technical. That's you.`, 'idea', 'important');
 
   return thoughts;
 }
 
-function emit(
-  thoughts: Thought[], templateKey: string, text: string,
-  category: Thought['category'], importance: Thought['importance'],
-) {
-  if (!shouldShow(templateKey, text)) return;
-  markShown(templateKey, text);
-  thoughts.push({
-    id: crypto.randomUUID(), text, category, importance,
-    timestamp: Date.now(), isNew: true, source: 'local', templateKey,
-  });
+function push(arr: Thought[], key: string, text: string, cat: Category, imp: Thought['importance']) {
+  if (!canShow(key, text)) return;
+  markSeen(key, text);
+  arr.push({ id: crypto.randomUUID(), text, category: cat, importance: imp, timestamp: Date.now(), isNew: true, source: 'local', templateKey: key });
 }
 
 // ---------------------------------------------------------------------------
 // Time helpers
 // ---------------------------------------------------------------------------
 
-function relativeTime(ts: number): string {
+function ago(ts: number): string {
   const d = Date.now() - ts, s = Math.floor(d / 1000);
-  if (s < 30) return 'just now';
-  if (s < 60) return 'moments ago';
+  if (s < 60) return 'just now';
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 }
-
-function formatDate(ts: number): string {
+function fmtDate(ts: number): string {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
@@ -363,266 +255,204 @@ function formatDate(ts: number): string {
 // ---------------------------------------------------------------------------
 
 export function App() {
-  const [tab, setTab] = useState<Tab>('stream');
+  const [tab, setTab]           = useState<Tab>('stream');
   const [thoughts, setThoughts] = useState<Thought[]>([]);
-  const [pinnedThoughts, setPinnedThoughts] = useState<Thought[]>([]);
-  const [coreMemory, setCoreMemory] = useState<CoreMemoryBlock[]>([]);
-  const [isThinking, setIsThinking] = useState(false);
+  const [pinned, setPinned]     = useState<Thought[]>([]);
+  const [memory, setMemory]     = useState<CoreMemoryBlock[]>([]);
+  const [thinking, setThinking] = useState(false);
   const [observers, setObservers] = useState<ObserverInfo[]>([]);
-  const [observationCount, setObservationCount] = useState(0);
-  const [aiStatus, setAiStatus] = useState<'checking' | 'online' | 'offline'>('checking');
+  const [obsCount, setObsCount] = useState(0);
+  const [aiOk, setAiOk]         = useState<boolean | null>(null);
   const [showStatus, setShowStatus] = useState(false);
   const thinkingRef = useRef(false);
 
-  // ── Merge thoughts by template key ──
-  const mergeThoughts = useCallback((incoming: Thought[]) => {
+  const merge = useCallback((incoming: Thought[]) => {
     if (!incoming.length) return;
     setThoughts(prev => {
       const byKey = new Map(prev.map(t => [t.templateKey, t]));
       const result = [...prev];
-      const newOnes: Thought[] = [];
+      const fresh: Thought[] = [];
       for (const t of incoming) {
-        const existing = byKey.get(t.templateKey);
-        if (existing) {
-          const idx = result.indexOf(existing);
-          if (idx >= 0) result[idx] = { ...t, isNew: false };
-        } else {
-          newOnes.push(t);
-          byKey.set(t.templateKey, t);
-        }
+        const ex = byKey.get(t.templateKey);
+        if (ex) { const i = result.indexOf(ex); if (i >= 0) result[i] = { ...t, isNew: false }; }
+        else { fresh.push(t); byKey.set(t.templateKey, t); }
       }
-      const important = newOnes.filter(t => t.importance === 'important');
-      if (important.length) {
-        setPinnedThoughts(pp => {
-          const keys = new Set(pp.map(p => p.templateKey));
-          return [...important.filter(i => !keys.has(i.templateKey)), ...pp].slice(0, 3);
-        });
-      }
-      return [...newOnes, ...result].slice(0, 50);
+      const imp = fresh.filter(t => t.importance === 'important');
+      if (imp.length) setPinned(pp => {
+        const keys = new Set(pp.map(p => p.templateKey));
+        return [...imp.filter(i => !keys.has(i.templateKey)), ...pp].slice(0, 3);
+      });
+      return [...fresh, ...result].slice(0, 50);
     });
   }, []);
 
-  // ── Think cycle ──
   const think = useCallback(async () => {
     if (thinkingRef.current) return;
-    thinkingRef.current = true;
-    setIsThinking(true);
+    thinkingRef.current = true; setThinking(true);
     try {
-      const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 100 });
-      setObservationCount(rawObs?.length ?? 0);
+      const rawObs = await inv<RawObs[]>('get_recent_observations', { limit: 100 });
+      setObsCount(rawObs?.length ?? 0);
       if (!rawObs?.length) return;
 
-      // Refresh core memory
-      const mem = await loadCoreMemory();
-      setCoreMemory(mem);
-
-      // Phase 1: Local idea generation (instant)
+      const mem = await loadMemory(); setMemory(mem);
       const ideas = await generateIdeas(mem);
-      mergeThoughts(ideas);
+      merge(ideas);
       if (ideas.length) persistThoughts(ideas).catch(() => {});
 
-      // Update user profile in core memory
-      const appStats: Record<string, number> = {};
-      const sites: string[] = [];
+      // Update user profile
+      const appS: Record<string, number> = {}; const sites: string[] = [];
       for (const o of rawObs) {
         if (o.event_type === 'app-session') {
           const n = (o.payload.appName as string) || '';
-          if (n && n !== 'WindowManager' && n !== 'Finder' && n !== 'loginwindow') {
-            appStats[n] = (appStats[n] || 0) + ((o.payload.sessionDurationSeconds as number) || 0);
-          }
+          if (n && !['WindowManager', 'Finder', 'loginwindow'].includes(n))
+            appS[n] = (appS[n] || 0) + ((o.payload.sessionDurationSeconds as number) || 0);
         }
         if (o.event_type === 'browsing-session') {
           const s = o.payload.domainVisited as string;
           if (s && !sites.includes(s)) sites.push(s);
         }
       }
-      const topApps = Object.entries(appStats).sort((a, b) => b[1] - a[1]).slice(0, 6)
-        .map(([n, s]) => `${n} (${Math.round(s/60)}m)`).join(', ');
+      const topApps = Object.entries(appS).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, s]) => `${n} (${Math.round(s / 60)}m)`).join(', ');
       const h = new Date().getHours();
-      const profile = [
-        topApps && `Apps: ${topApps}`,
-        sites.length && `Sites: ${sites.slice(0, 5).join(', ')}`,
-        `Active: ${h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'}`,
-      ].filter(Boolean).join('. ');
-      if (profile) saveCoreMemory('user_profile', profile).catch(() => {});
+      const profile = [topApps && `Apps: ${topApps}`, sites.length && `Sites: ${sites.slice(0, 5).join(', ')}`, `Active: ${h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'}`].filter(Boolean).join('. ');
+      if (profile) saveMemory('user_profile', profile).catch(() => {});
 
-      // Phase 2: AI (background)
       callAI(mem, thoughts.slice(0, 5)).then(ai => {
-        if (ai.length) {
-          mergeThoughts(ai);
-          persistThoughts(ai).catch(() => {});
-        }
-      }).catch(() => {}).finally(() => {
-        thinkingRef.current = false;
-        setIsThinking(false);
-      });
-    } catch {
-      thinkingRef.current = false;
-      setIsThinking(false);
-    }
-  }, [mergeThoughts, thoughts]);
+        if (ai.length) { merge(ai); persistThoughts(ai).catch(() => {}); }
+      }).catch(() => {}).finally(() => { thinkingRef.current = false; setThinking(false); });
+    } catch { thinkingRef.current = false; setThinking(false); }
+  }, [merge, thoughts]);
 
-  // ── Setup ──
   useEffect(() => {
-    // Check Ollama
-    tauriInvoke<{ available: boolean }>('check_ai_status').then(r => setAiStatus(r?.available ? 'online' : 'offline'));
-
-    // Load observers
-    tauriInvoke<ObserverInfo[]>('get_observer_status').then(obs => { if (obs) setObservers(obs); });
-
-    // Load core memory
-    loadCoreMemory().then(setCoreMemory);
-
-    // Load persisted thoughts from previous sessions
-    loadPersistedThoughts().then(persisted => {
-      if (persisted.length) {
-        setThoughts(persisted);
-        for (const t of persisted) shownTemplates.set(t.templateKey, { text: t.text, timestamp: t.timestamp });
-        // Pin important ones
-        setPinnedThoughts(persisted.filter(t => t.importance === 'important').slice(0, 3));
+    inv<{ available: boolean }>('check_ai_status').then(r => setAiOk(r?.available ?? false));
+    inv<ObserverInfo[]>('get_observer_status').then(obs => { if (obs) setObservers(obs); });
+    loadMemory().then(setMemory);
+    loadSaved().then(saved => {
+      if (saved.length) {
+        setThoughts(saved);
+        for (const t of saved) seenKeys.set(t.templateKey, { text: t.text, ts: t.timestamp });
+        setPinned(saved.filter(t => t.importance === 'important').slice(0, 3));
       }
     });
-
-    // First think
     think();
 
-    const t1 = setTimeout(() => {
-      const localInt = setInterval(async () => {
-        const mem = await loadCoreMemory();
-        setCoreMemory(mem);
-        const ideas = await generateIdeas(mem);
-        mergeThoughts(ideas);
+    const tid = setTimeout(() => {
+      const i1 = setInterval(async () => {
+        const mem = await loadMemory(); setMemory(mem);
+        const ideas = await generateIdeas(mem); merge(ideas);
         if (ideas.length) persistThoughts(ideas).catch(() => {});
-        const rawObs = await tauriInvoke<RawObservation[]>('get_recent_observations', { limit: 100 });
-        setObservationCount(rawObs?.length ?? 0);
+        const r = await inv<RawObs[]>('get_recent_observations', { limit: 100 }); setObsCount(r?.length ?? 0);
       }, 60_000);
-
-      const aiInt = setInterval(async () => {
+      const i2 = setInterval(async () => {
         if (thinkingRef.current) return;
-        thinkingRef.current = true;
-        setIsThinking(true);
-        const mem = await loadCoreMemory();
+        thinkingRef.current = true; setThinking(true);
+        const mem = await loadMemory();
         const ai = await callAI(mem, []);
-        if (ai.length) { mergeThoughts(ai); persistThoughts(ai).catch(() => {}); }
-        thinkingRef.current = false;
-        setIsThinking(false);
+        if (ai.length) { merge(ai); persistThoughts(ai).catch(() => {}); }
+        thinkingRef.current = false; setThinking(false);
       }, 120_000);
-
-      const obsInt = setInterval(async () => {
-        const obs = await tauriInvoke<ObserverInfo[]>('get_observer_status');
-        if (obs) setObservers(obs);
+      const i3 = setInterval(async () => {
+        const obs = await inv<ObserverInfo[]>('get_observer_status'); if (obs) setObservers(obs);
       }, 15_000);
-
-      return () => { clearInterval(localInt); clearInterval(aiInt); clearInterval(obsInt); };
+      return () => { clearInterval(i1); clearInterval(i2); clearInterval(i3); };
     }, 3000);
-
-    return () => clearTimeout(t1);
+    return () => clearTimeout(tid);
   }, []); // eslint-disable-line
 
-  // Clear new flag
   useEffect(() => {
-    if (thoughts.some(t => t.isNew)) {
-      const tid = setTimeout(() => setThoughts(p => p.map(t => t.isNew ? { ...t, isNew: false } : t)), 2000);
-      return () => clearTimeout(tid);
-    }
+    if (!thoughts.some(t => t.isNew)) return;
+    const tid = setTimeout(() => setThoughts(p => p.map(t => t.isNew ? { ...t, isNew: false } : t)), 1800);
+    return () => clearTimeout(tid);
   }, [thoughts]);
 
   const totalEvents = observers.reduce((s, o) => s + o.events_collected, 0);
+  const activeObs = observers.filter(o => o.enabled);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#080808', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0f0f10', color: '#f2f2f0', overflow: 'hidden', fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif' }}>
 
       {/* ── Header ── */}
-      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px 0', flexShrink: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ position: 'relative', width: 7, height: 7 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', background: isThinking ? '#7b9aff' : '#2a2a26', transition: 'background 0.6s' }} />
-            {isThinking && <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: '#7b9aff', animation: 'pulse-subtle 1.5s ease-in-out infinite' }} />}
+      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px 0', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ position: 'relative', width: 8, height: 8 }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: thinking ? '#7c9fff' : thoughts.length > 0 ? '#4ade80' : '#333330', transition: 'background 0.5s' }} />
+            {thinking && <div className="pulse-dot" style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: '#7c9fff' }} />}
           </div>
-          <span style={{ color: '#e8e8e4', fontSize: 12, fontWeight: 600, letterSpacing: '0.15em' }}>PRE</span>
-          {isThinking && <span className="fade-in" style={{ color: '#2a2a26', fontSize: 9, letterSpacing: '0.1em' }}>thinking</span>}
+          <span style={{ color: '#f2f2f0', fontSize: 12, fontWeight: 700, letterSpacing: '0.18em' }}>PRE</span>
+          {thinking && <span className="fade-in" style={{ color: '#585854', fontSize: 10 }}>thinking…</span>}
         </div>
-
-        <button type="button" onClick={() => setShowStatus(!showStatus)}
-          style={{ color: '#2a2a26', fontSize: 9, cursor: 'pointer', background: 'none', border: 'none', padding: '2px 4px', letterSpacing: '0.05em' }}>
-          {totalEvents > 0 ? `${totalEvents}` : '···'}
+        <button type="button" onClick={() => setShowStatus(!showStatus)} style={{ background: showStatus ? '#1c1c1f' : 'none', border: showStatus ? '1px solid rgba(255,255,255,0.07)' : 'none', borderRadius: 6, padding: '3px 8px', color: '#585854', fontSize: 10, cursor: 'pointer' }}>
+          {totalEvents > 0 ? `${totalEvents} signals` : '···'}
         </button>
       </header>
 
       {/* ── Status panel ── */}
       {showStatus && (
-        <div className="fade-in" style={{ padding: '8px 20px 10px', margin: '8px 0 0', borderTop: '1px solid rgba(255,255,255,0.03)', borderBottom: '1px solid rgba(255,255,255,0.03)', background: '#0c0c0c' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 16px' }}>
-            <StatusDot label="AI" value={aiStatus === 'online' ? 'llama 3.1' : 'offline'} ok={aiStatus === 'online'} />
-            <StatusDot label="buffered" value={String(observationCount)} ok={observationCount > 0} />
+        <div className="fade-in" style={{ margin: '8px 18px 0', borderRadius: 10, background: '#161618', border: '1px solid rgba(255,255,255,0.07)', padding: '10px 14px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px' }}>
+            <StatusRow label="AI Engine" value={aiOk === true ? 'llama 3.1 8b' : aiOk === false ? 'offline' : '…'} ok={aiOk === true} />
+            <StatusRow label="Buffered" value={`${obsCount} obs`} ok={obsCount > 0} />
+            <StatusRow label="Observers" value={`${activeObs.length} active`} ok={activeObs.length > 0} />
             {observers.map(o => (
-              <StatusDot key={o.name} label={o.name} value={o.events_collected > 0 ? String(o.events_collected) : o.enabled ? '–' : 'off'} ok={o.enabled && o.events_collected > 0} />
+              <StatusRow key={o.name} label={o.name} value={o.events_collected > 0 ? String(o.events_collected) : o.enabled ? '–' : 'off'} ok={o.enabled && o.events_collected > 0} />
             ))}
           </div>
         </div>
       )}
 
       {/* ── Tab bar ── */}
-      <div style={{ display: 'flex', padding: '10px 20px 0', gap: 20, flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.03)', marginTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', margin: '12px 18px 0', borderBottom: '1px solid rgba(255,255,255,0.07)', flexShrink: 0 }}>
         {(['stream', 'memory'] as Tab[]).map(t => (
-          <button key={t} type="button" onClick={() => setTab(t)}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer', padding: '0 0 8px',
-              fontSize: 10, letterSpacing: '0.1em',
-              color: tab === t ? '#e8e8e4' : '#2a2a26',
-              borderBottom: tab === t ? '1px solid #4a4a46' : '1px solid transparent',
-              transition: 'color 0.2s',
-            }}>
-            {t === 'stream' ? 'stream' : 'memory'}
+          <button key={t} type="button" onClick={() => setTab(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px 16px 9px', fontSize: 11, fontWeight: tab === t ? 600 : 400, color: tab === t ? '#f2f2f0' : '#585854', borderBottom: tab === t ? '2px solid #7c9fff' : '2px solid transparent', marginBottom: -1, transition: 'color 0.15s', letterSpacing: '0.05em' }}>
+            {t}
           </button>
         ))}
         {tab === 'stream' && thoughts.length > 0 && (
-          <span style={{ marginLeft: 'auto', color: '#1a1a18', fontSize: 9, paddingBottom: 8 }}>
-            {thoughts.length} thoughts
-          </span>
+          <span style={{ marginLeft: 'auto', color: '#333330', fontSize: 10, paddingBottom: 8 }}>{thoughts.length}</span>
         )}
       </div>
 
-      {/* ── Pinned (stream tab only) ── */}
-      {tab === 'stream' && pinnedThoughts.length > 0 && (
-        <div style={{ padding: '8px 20px', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.03)', background: 'rgba(123,154,255,0.02)' }}>
-          {pinnedThoughts.map(t => (
-            <div key={t.id} style={{ padding: '3px 0' }}>
-              <p style={{ color: '#d4d4d0', fontSize: 12, lineHeight: 1.75, margin: 0, fontStyle: 'italic' }}>{t.text}</p>
-            </div>
-          ))}
+      {/* ── Pinned (stream only) ── */}
+      {tab === 'stream' && pinned.length > 0 && (
+        <div style={{ margin: '10px 18px 0', borderRadius: 10, background: 'rgba(124,159,255,0.06)', border: '1px solid rgba(124,159,255,0.18)', padding: '10px 14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#7c9fff' }} />
+            <span style={{ color: '#7c9fff', fontSize: 9, fontWeight: 700, letterSpacing: '0.14em' }}>PINNED</span>
+          </div>
+          {pinned.map(t => <p key={t.id} style={{ color: '#a0a09c', fontSize: 12.5, lineHeight: 1.7, margin: '0 0 4px', fontStyle: 'italic' }}>{t.text}</p>)}
         </div>
       )}
 
-      {/* ── Stream tab ── */}
+      {/* ── Stream ── */}
       {tab === 'stream' && (
-        <div className="overflow-y-auto" style={{ flex: 1, padding: '4px 20px 40px' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '10px 18px 40px' }}>
           {thoughts.length === 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 12 }}>
-              <div className="glow-breathe" style={{ width: 8, height: 8, borderRadius: '50%', background: '#7b9aff' }} />
-              <p style={{ color: '#2a2a26', fontSize: 11, textAlign: 'center', lineHeight: 1.9, maxWidth: 220 }}>
-                Watching your patterns.<br />Ideas will surface soon.
-              </p>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 16 }}>
+              <div className="breathe" style={{ width: 10, height: 10, borderRadius: '50%', background: '#7c9fff' }} />
+              <div style={{ textAlign: 'center' }}>
+                <p style={{ color: '#a0a09c', fontSize: 13, margin: '0 0 6px' }}>Watching your patterns.</p>
+                <p style={{ color: '#585854', fontSize: 11, margin: 0 }}>Ideas will surface as I learn what you do.</p>
+              </div>
             </div>
           ) : (
-            thoughts.map(t => <ThoughtRow key={t.id} thought={t} />)
+            thoughts.map(t => <ThoughtCard key={t.id} thought={t} />)
           )}
         </div>
       )}
 
-      {/* ── Memory tab ── */}
-      {tab === 'memory' && (
-        <MemoryTab coreMemory={coreMemory} thoughts={thoughts} />
-      )}
+      {/* ── Memory ── */}
+      {tab === 'memory' && <MemoryTab memory={memory} thoughts={thoughts} />}
 
       {/* ── Footer ── */}
-      <footer style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 20px 8px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.02)' }}>
-        <span style={{ color: '#1a1a18', fontSize: 9 }}>
-          {thoughts.filter(t => t.source === 'ai').length > 0 ? `${thoughts.filter(t => t.source === 'ai').length} from ai` : ''}
+      <footer style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 18px 10px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+        <span style={{ color: '#333330', fontSize: 10 }}>
+          {thoughts.filter(t => t.source === 'ai').length > 0
+            ? `${thoughts.filter(t => t.source === 'ai').length} ai · ${thoughts.filter(t => t.source === 'local').length} local`
+            : thoughts.length > 0 ? `${thoughts.length} thoughts` : ''}
         </span>
-        <button type="button" onClick={() => { if (!thinkingRef.current) think(); }} disabled={isThinking}
-          style={{ color: isThinking ? '#1a1a18' : '#2a2a26', fontSize: 9, cursor: isThinking ? 'default' : 'pointer', background: 'none', border: 'none', padding: '2px 6px' }}>
-          {isThinking ? 'thinking' : 'think now'}
+        <button type="button" onClick={() => { if (!thinkingRef.current) think(); }} disabled={thinking}
+          style={{ background: thinking ? 'none' : '#161618', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '4px 12px', color: thinking ? '#333330' : '#a0a09c', fontSize: 10, cursor: thinking ? 'default' : 'pointer', transition: 'all 0.15s' }}>
+          {thinking ? 'thinking…' : 'think now'}
         </button>
       </footer>
     </div>
@@ -630,137 +460,121 @@ export function App() {
 }
 
 // ---------------------------------------------------------------------------
-// Memory Tab
+// ThoughtCard
 // ---------------------------------------------------------------------------
 
-function MemoryTab({ coreMemory, thoughts }: { coreMemory: CoreMemoryBlock[]; thoughts: Thought[] }) {
-  const byCategory = thoughts.reduce((acc, t) => {
-    const key = t.source === 'ai' ? 'ai insights' : t.category;
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(t);
-    return acc;
-  }, {} as Record<string, Thought[]>);
-
-  const LABELS: Record<string, string> = {
-    idea: 'Ideas', blindspot: 'Blind Spots', question: 'Open Questions',
-    challenge: 'Challenges', insight: 'Insights', prediction: 'Predictions',
-    pattern: 'Patterns', nudge: 'Nudges', reflection: 'Reflections',
-    'ai insights': 'AI Insights', plan: 'Plans', memory: 'Memory',
-  };
-
-  return (
-    <div className="overflow-y-auto" style={{ flex: 1, padding: '16px 20px 40px' }}>
-
-      {/* Core Memory Blocks */}
-      {coreMemory.length > 0 && (
-        <div style={{ marginBottom: 28 }}>
-          <SectionHeader label="What I know about you" />
-          {coreMemory.map(block => (
-            <div key={block.label} style={{ marginBottom: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 3 }}>
-                <span style={{ color: '#4a4a46', fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  {block.label.replace(/_/g, ' ')}
-                </span>
-                <span style={{ color: '#1a1a18', fontSize: 8 }}>v{block.version} · {relativeTime(block.updatedAt)}</span>
-              </div>
-              <p style={{ color: '#6a6a66', fontSize: 11.5, lineHeight: 1.75, margin: 0 }}>{block.value}</p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {coreMemory.length === 0 && (
-        <div style={{ marginBottom: 28 }}>
-          <SectionHeader label="What I know about you" />
-          <p style={{ color: '#2a2a26', fontSize: 11 }}>Still building your profile. Keep using PRE.</p>
-        </div>
-      )}
-
-      {/* Thoughts by category */}
-      {Object.entries(byCategory)
-        .sort((a, b) => b[1].length - a[1].length)
-        .map(([cat, items]) => (
-          <div key={cat} style={{ marginBottom: 24 }}>
-            <SectionHeader label={LABELS[cat] || cat} count={items.length} />
-            {items.slice(0, 8).map(t => (
-              <div key={t.id} style={{ marginBottom: 10, paddingLeft: 12, borderLeft: `1px solid ${CAT_ACCENT[t.category] || '#2a2a26'}18` }}>
-                <p style={{ color: '#8a8a86', fontSize: 11.5, lineHeight: 1.75, margin: 0 }}>{t.text}</p>
-                <span style={{ color: '#1a1a18', fontSize: 8 }}>{formatDate(t.timestamp)}</span>
-              </div>
-            ))}
-          </div>
-        ))}
-
-      {thoughts.length === 0 && (
-        <p style={{ color: '#2a2a26', fontSize: 11 }}>No thoughts stored yet. Start the stream first.</p>
-      )}
-    </div>
-  );
-}
-
-function SectionHeader({ label, count }: { label: string; count?: number }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-      <span style={{ color: '#2a2a26', fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase' }}>{label}</span>
-      {count !== undefined && <span style={{ color: '#1a1a18', fontSize: 9 }}>{count}</span>}
-      <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.03)' }} />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ThoughtRow
-// ---------------------------------------------------------------------------
-
-const CAT_ACCENT: Record<string, string> = {
-  idea: '#7b9aff',
-  blindspot: '#f87171',
-  question: '#fbbf24',
-  challenge: '#fb923c',
-  insight: '#a78bfa',
-  prediction: '#34d399',
-  pattern: '#818cf8',
-  nudge: '#f472b6',
-  reflection: '#5a5a56',
-  plan: '#38bdf8',
-  memory: '#94a3b8',
-};
-
-const CAT_LABEL: Record<string, string> = {
-  idea: 'idea', blindspot: 'blind spot', question: 'question',
-  challenge: 'challenge', insight: 'insight', prediction: 'prediction',
-  pattern: 'pattern', nudge: 'nudge', reflection: 'reflection',
-  plan: 'plan', memory: 'memory',
-};
-
-function ThoughtRow({ thought }: { thought: Thought }) {
-  const accent = CAT_ACCENT[thought.category] || '#5a5a56';
+function ThoughtCard({ thought }: { thought: Thought }) {
+  const cat = CAT[thought.category] || CAT.reflection;
   const notable = thought.importance !== 'ambient';
 
   return (
-    <div className={thought.isNew ? 'thought-enter' : ''} style={{ padding: '11px 0 11px 14px', borderLeft: `1.5px solid ${notable ? accent + '22' : 'transparent'}`, marginBottom: 1 }}>
-      <p style={{ color: notable ? '#c0c0bc' : '#6a6a66', fontSize: 12.5, lineHeight: 1.85, fontWeight: notable ? 400 : 300, margin: 0, letterSpacing: '-0.01em' }}>
+    <div className={thought.isNew ? 'thought-enter' : ''} style={{
+      padding: '13px 15px', margin: '5px 0', borderRadius: 12,
+      background: notable ? '#161618' : 'transparent',
+      border: notable ? '1px solid rgba(255,255,255,0.07)' : '1px solid transparent',
+      transition: 'background 0.2s',
+    }}>
+      {/* Category chip */}
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginBottom: 8, background: cat.bg, borderRadius: 100, padding: '3px 9px' }}>
+        <div style={{ width: 5, height: 5, borderRadius: '50%', background: cat.color, flexShrink: 0 }} />
+        <span style={{ color: cat.color, fontSize: 9.5, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{cat.label}</span>
+      </div>
+
+      {/* Text — full contrast for notable, dimmed for ambient */}
+      <p style={{ color: notable ? '#f2f2f0' : '#a0a09c', fontSize: 13, lineHeight: 1.8, margin: '0 0 9px', fontWeight: notable ? 400 : 350 }}>
         {thought.text}
       </p>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4 }}>
-        <span style={{ color: '#1a1a18', fontSize: 8 }}>{relativeTime(thought.timestamp)}</span>
-        <span style={{ color: `${accent}28`, fontSize: 8, letterSpacing: '0.06em' }}>{CAT_LABEL[thought.category] || thought.category}</span>
-        {thought.source === 'ai' && <span style={{ color: '#7b9aff16', fontSize: 8 }}>ai</span>}
+
+      {/* Meta */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ color: '#585854', fontSize: 10 }}>{ago(thought.timestamp)}</span>
+        {thought.source === 'ai' && (
+          <span style={{ color: '#7c9fff', fontSize: 9, fontWeight: 600, background: 'rgba(124,159,255,0.1)', borderRadius: 100, padding: '1px 7px', letterSpacing: '0.06em' }}>AI</span>
+        )}
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// StatusDot
+// MemoryTab
 // ---------------------------------------------------------------------------
 
-function StatusDot({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+function MemoryTab({ memory, thoughts }: { memory: CoreMemoryBlock[]; thoughts: Thought[] }) {
+  const groups = thoughts.reduce((acc, t) => {
+    const k = t.source === 'ai' ? 'ai' : t.category;
+    if (!acc[k]) acc[k] = [];
+    acc[k].push(t);
+    return acc;
+  }, {} as Record<string, Thought[]>);
+
+  const LABELS: Record<string, string> = { idea: 'Ideas', blindspot: 'Blind Spots', question: 'Open Questions', challenge: 'Challenges', insight: 'Insights', prediction: 'Predictions', pattern: 'Patterns', nudge: 'Nudges', reflection: 'Reflections', ai: 'AI Insights', plan: 'Plans', memory: 'Memory' };
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '16px 18px 40px' }}>
+      {/* Core memory */}
+      <div style={{ marginBottom: 28 }}>
+        <SectionLabel text="What I know about you" />
+        {memory.length === 0
+          ? <p style={{ color: '#585854', fontSize: 12, margin: 0 }}>Still building your profile. Keep using PRE.</p>
+          : memory.map(b => (
+            <div key={b.label} style={{ marginBottom: 12, padding: '12px 14px', borderRadius: 10, background: '#161618', border: '1px solid rgba(255,255,255,0.07)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ color: '#a0a09c', fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{b.label.replace(/_/g, ' ')}</span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <span style={{ color: '#585854', fontSize: 10 }}>v{b.version}</span>
+                  <span style={{ color: '#585854', fontSize: 10 }}>{ago(b.updatedAt)}</span>
+                </div>
+              </div>
+              <p style={{ color: '#a0a09c', fontSize: 12.5, lineHeight: 1.75, margin: 0 }}>{b.value}</p>
+            </div>
+          ))}
+      </div>
+
+      {/* Thought groups */}
+      {Object.entries(groups).sort((a, b) => b[1].length - a[1].length).map(([key, items]) => {
+        const c = key === 'ai' ? null : CAT[key as Category];
+        return (
+          <div key={key} style={{ marginBottom: 24 }}>
+            <SectionLabel text={LABELS[key] || key} count={items.length} color={c?.color} />
+            {items.slice(0, 6).map(t => (
+              <div key={t.id} style={{ marginBottom: 8, padding: '10px 13px', borderRadius: 9, background: '#161618', border: '1px solid rgba(255,255,255,0.06)' }}>
+                {c && (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginBottom: 5, background: c.bg, borderRadius: 100, padding: '2px 8px' }}>
+                    <div style={{ width: 4, height: 4, borderRadius: '50%', background: c.color }} />
+                    <span style={{ color: c.color, fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{c.label}</span>
+                  </div>
+                )}
+                <p style={{ color: '#a0a09c', fontSize: 12.5, lineHeight: 1.7, margin: '0 0 5px' }}>{t.text}</p>
+                <span style={{ color: '#585854', fontSize: 10 }}>{fmtDate(t.timestamp)}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+
+      {thoughts.length === 0 && <p style={{ color: '#585854', fontSize: 12 }}>No thoughts stored yet. Open the stream tab first.</p>}
+    </div>
+  );
+}
+
+function SectionLabel({ text, count, color }: { text: string; count?: number; color?: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+      {color && <div style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />}
+      <span style={{ color: '#a0a09c', fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase' }}>{text}</span>
+      {count !== undefined && <span style={{ color: '#585854', fontSize: 10 }}>{count}</span>}
+      <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.05)' }} />
+    </div>
+  );
+}
+
+function StatusRow({ label, value, ok }: { label: string; value: string; ok: boolean }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
-      <div style={{ width: 4, height: 4, borderRadius: '50%', flexShrink: 0, background: ok ? '#4ade8040' : '#1a1a18' }} />
-      <span style={{ color: '#2a2a26', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-      <span style={{ color: '#1a1a18', fontSize: 9, marginLeft: 'auto', flexShrink: 0 }}>{value}</span>
+      <div style={{ width: 5, height: 5, borderRadius: '50%', flexShrink: 0, background: ok ? '#4ade80' : '#333330' }} />
+      <span style={{ color: '#a0a09c', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ color: ok ? '#4ade80' : '#585854', fontSize: 10, marginLeft: 'auto', flexShrink: 0 }}>{value}</span>
     </div>
   );
 }
