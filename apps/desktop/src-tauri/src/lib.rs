@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{
     Manager,
+    WebviewWindowBuilder,
     tray::TrayIconBuilder,
 };
 use tokio::sync::mpsc;
@@ -688,6 +689,324 @@ async fn check_ai_status() -> Result<serde_json::Value, String> {
 // ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
+// Command executor — controls the Mac on behalf of the user
+// ---------------------------------------------------------------------------
+
+/// Run an AppleScript and return stdout. Non-fatal: errors are returned as Err.
+fn run_osascript(script: &str) -> Result<String, String> {
+    let out = std::process::Command::new("osascript")
+        .arg("-e").arg(script)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Open a URL in Google Chrome (or the default browser if Chrome isn't installed).
+fn open_in_chrome(url: &str) -> Result<(), String> {
+    // Sanitise: escape double-quotes inside the URL so AppleScript doesn't break
+    let safe_url = url.replace('"', "%22");
+    let script = format!(
+        "tell application \"Google Chrome\"\n\
+         activate\n\
+         if (count windows) = 0 then make new window\n\
+         open location \"{}\"\n\
+         end tell",
+        safe_url
+    );
+    run_osascript(&script).map(|_| ())
+}
+
+/// Minimal percent-encoding: spaces → +, special chars → %XX.
+fn url_encode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            ' ' => '+'.to_string(),
+            _ => format!("%{:02X}", c as u32),
+        })
+        .collect()
+}
+
+/// Capitalise each word (for app names: "google chrome" → "Google Chrome").
+fn title_case(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Hide the command-input window. Called from JS on Escape / blur.
+#[tauri::command]
+fn close_command_input(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("command-input") {
+        let _ = w.hide();
+    }
+    Ok(())
+}
+
+/// Bring the main PRE window to front and hide the command input.
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("command-input") {
+        let _ = w.hide();
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    Ok(())
+}
+
+/// Execute a natural-language command. Pattern-matches common intents first
+/// (fast, no LLM), falls back to Ollama for anything unrecognised.
+#[tauri::command]
+async fn execute_command(text: String) -> Result<serde_json::Value, String> {
+    let t = text.trim().to_lowercase();
+
+    // ── Amazon / shopping ────────────────────────────────────────────────
+    let is_amazon = t.contains("amazon") || t.starts_with("buy ") || t.starts_with("order ");
+    if is_amazon {
+        let query = t
+            .replace("on amazon", "").replace("at amazon", "")
+            .replace("amazon", "").replace("search", "")
+            .replace("buy", "").replace("order", "").replace("find", "")
+            .trim().to_string();
+        let url = format!("https://www.amazon.com/s?k={}", url_encode(query.trim()));
+        open_in_chrome(&url)?;
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "📦",
+            "message": format!("Amazon: searching \"{}\"", query.trim())
+        }));
+    }
+
+    // ── YouTube ──────────────────────────────────────────────────────────
+    if t.starts_with("youtube ") || t.contains(" on youtube") || t.starts_with("watch ") {
+        let q = t.replace("youtube", "").replace("on youtube", "")
+                  .replace("watch", "").replace("search", "").trim().to_string();
+        let url = format!("https://www.youtube.com/results?search_query={}", url_encode(&q));
+        open_in_chrome(&url)?;
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "📺",
+            "message": format!("YouTube: \"{}\"", q)
+        }));
+    }
+
+    // ── Kick ─────────────────────────────────────────────────────────────
+    if t.starts_with("kick ") || t.contains("kick.com") {
+        let slug = t.replace("kick.com", "").replace("kick", "").replace("open", "")
+                    .replace("go to", "").replace("/", "").trim().to_string();
+        let url = if slug.is_empty() {
+            "https://kick.com".to_string()
+        } else {
+            format!("https://kick.com/{}", slug)
+        };
+        open_in_chrome(&url)?;
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "📺",
+            "message": format!("Opened kick.com/{}", slug)
+        }));
+    }
+
+    // ── Reddit ───────────────────────────────────────────────────────────
+    if t.starts_with("r/") || (t.contains("reddit") && t.contains('/')) {
+        let sub = t.replace("reddit.com", "").replace("reddit", "")
+                    .replace("open", "").replace("go to", "").replace("r/", "")
+                    .replace('/', "").trim().to_string();
+        let url = if sub.is_empty() {
+            "https://reddit.com".to_string()
+        } else {
+            format!("https://reddit.com/r/{}", sub)
+        };
+        open_in_chrome(&url)?;
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "🔴",
+            "message": format!("Opened r/{}", sub)
+        }));
+    }
+
+    // ── Google search ────────────────────────────────────────────────────
+    if t.starts_with("google ") || t.starts_with("search ") || t.starts_with("search for ") {
+        let q = t.splitn(2, ' ').nth(1).unwrap_or("")
+                  .trim_start_matches("for ").trim().to_string();
+        let url = format!("https://www.google.com/search?q={}", url_encode(&q));
+        open_in_chrome(&url)?;
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "🔍",
+            "message": format!("Searching: \"{}\"", q)
+        }));
+    }
+
+    // ── Direct URL navigation ─────────────────────────────────────────────
+    if t.starts_with("go to ") || t.starts_with("navigate to ") ||
+       t.starts_with("open https://") || t.starts_with("open http://") ||
+       t.contains('.') && t.split_whitespace().count() == 1
+    {
+        let raw = t.splitn(2, ' ').nth(1).unwrap_or(&t).trim();
+        let url = if raw.starts_with("http") { raw.to_string() }
+                  else { format!("https://{}", raw) };
+        open_in_chrome(&url)?;
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "🌐",
+            "message": format!("Opened {}", url)
+        }));
+    }
+
+    // ── Spotify / music ───────────────────────────────────────────────────
+    if t.starts_with("play ") {
+        let q = t[5..].trim();
+        // Open via Spotify URI scheme (works without AppleScript permissions)
+        let uri = format!("spotify:search:{}", url_encode(q));
+        let _ = run_osascript(&format!("open location \"{}\"", uri));
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "🎵",
+            "message": format!("Spotify: \"{}\"", q)
+        }));
+    }
+    if t == "pause" || t == "pause music" || t == "stop music" {
+        let _ = run_osascript(
+            "if application \"Spotify\" is running then tell application \"Spotify\" to pause",
+        );
+        return Ok(serde_json::json!({"ok": true, "icon": "⏸", "message": "Paused"}));
+    }
+    if t == "next" || t == "next track" || t == "skip" {
+        let _ = run_osascript(
+            "if application \"Spotify\" is running then tell application \"Spotify\" to next track",
+        );
+        return Ok(serde_json::json!({"ok": true, "icon": "⏭", "message": "Next track"}));
+    }
+
+    // ── Volume ────────────────────────────────────────────────────────────
+    if t.contains("volume") {
+        if let Some(n) = t.split_whitespace()
+            .find_map(|w| w.trim_matches('%').parse::<u8>().ok())
+        {
+            let v = n.min(100);
+            run_osascript(&format!("set volume output volume {}", v))?;
+            return Ok(serde_json::json!({
+                "ok": true, "icon": "🔊",
+                "message": format!("Volume: {}%", v)
+            }));
+        }
+    }
+
+    // ── Open application ──────────────────────────────────────────────────
+    if t.starts_with("open ") || t.starts_with("launch ") || t.starts_with("start ") {
+        let raw = t.splitn(2, ' ').nth(1).unwrap_or("").trim().to_string();
+        let app_name = title_case(&raw);
+        match run_osascript(&format!("tell application \"{}\" to activate", app_name)) {
+            Ok(_) => return Ok(serde_json::json!({
+                "ok": true, "icon": "🚀",
+                "message": format!("Opened {}", app_name)
+            })),
+            Err(e) => return Ok(serde_json::json!({
+                "ok": false, "icon": "❌",
+                "message": format!("Couldn't open {}: {}", app_name, e)
+            })),
+        }
+    }
+
+    // ── Open PRE ──────────────────────────────────────────────────────────
+    if t == "pre" || t == "open pre" || t == "show pre" {
+        return Ok(serde_json::json!({
+            "ok": true, "icon": "✦",
+            "message": "__open_main__"   // sentinel picked up by frontend
+        }));
+    }
+
+    // ── AI fallback — Ollama generates an action plan ─────────────────────
+    ai_action_plan(&text).await
+}
+
+/// Ask Ollama to interpret the command and return a structured action.
+async fn ai_action_plan(text: &str) -> Result<serde_json::Value, String> {
+    let prompt = format!(
+        r#"You are a macOS automation agent. The user command is: "{}"
+
+Reply ONLY with a JSON object — no explanation, no markdown.
+Choose one of these action types:
+
+navigate  → open a URL in Chrome:    {{"action":"navigate","url":"https://...","icon":"🌐","description":"..."}}
+applescript → run macOS AppleScript: {{"action":"applescript","script":"...","icon":"⚡","description":"..."}}
+message   → can't do it:             {{"action":"message","icon":"💬","description":"I can't do that yet: ..."}}
+
+For any web task (shopping, searching, watching, reading) use navigate.
+For system control (volume, apps, music) use applescript.
+JSON only:"#,
+        text
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("http://127.0.0.1:11434/api/generate")
+        .json(&serde_json::json!({
+            "model": "llama3.1:8b",
+            "prompt": prompt,
+            "stream": false,
+            "options": { "temperature": 0.2, "num_predict": 200, "num_ctx": 512 }
+        }))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let raw = body.get("response").and_then(|v| v.as_str()).unwrap_or("{}");
+
+    let json_str = match (raw.find('{'), raw.rfind('}')) {
+        (Some(s), Some(e)) => &raw[s..=e],
+        _ => return Ok(serde_json::json!({
+            "ok": false, "icon": "🤔",
+            "message": "I don't know how to do that yet. Try: open X · search X · buy X on amazon · youtube X · play X · volume 70"
+        })),
+    };
+
+    let plan: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+
+    match plan.get("action").and_then(|v| v.as_str()) {
+        Some("navigate") => {
+            let url = plan["url"].as_str().unwrap_or("");
+            if url.is_empty() {
+                return Err("No URL".into());
+            }
+            open_in_chrome(url)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "icon": plan["icon"].as_str().unwrap_or("🌐"),
+                "message": plan["description"].as_str().unwrap_or("Done")
+            }))
+        }
+        Some("applescript") => {
+            let script = plan["script"].as_str().unwrap_or("");
+            if script.is_empty() {
+                return Err("No script".into());
+            }
+            run_osascript(script)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "icon": plan["icon"].as_str().unwrap_or("⚡"),
+                "message": plan["description"].as_str().unwrap_or("Done")
+            }))
+        }
+        _ => Ok(serde_json::json!({
+            "ok": false,
+            "icon": plan["icon"].as_str().unwrap_or("💬"),
+            "message": plan["description"].as_str()
+                .unwrap_or("I can't do that yet. Try: open X · search X · buy X on amazon · youtube X · play X · volume 70")
+        })),
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -709,32 +1028,65 @@ pub fn run() {
             load_thoughts,
             save_core_memory,
             load_core_memory,
+            close_command_input,
+            open_main_window,
+            execute_command,
         ])
         .setup(|app| {
-            // ── Tray icon ────────────────────────────────────────────
+            // ── Command-input window (hidden, shown on tray click) ───────
+            let _cmd_win = WebviewWindowBuilder::new(
+                app,
+                "command-input",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("")
+            .decorations(false)
+            .always_on_top(true)
+            .visible(false)
+            .inner_size(560.0, 110.0)
+            .resizable(false)
+            .skip_taskbar(true)
+            .build()?;
+
+            // ── Tray icon ────────────────────────────────────────────────
             let idle_image = tauri::image::Image::from_bytes(ICON_IDLE)
                 .expect("Failed to decode idle tray icon");
 
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(idle_image)
                 .icon_as_template(true)
-                .tooltip(tooltip_for_state(TrayState::Idle))
+                .tooltip("PRE — click to run a command")
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                    // Only handle left-click release — avoids double-fire on macOS
+                    // (macOS sends both MouseButtonState::Down and ::Up as Click events)
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        position,
+                        ..
+                    } = event {
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
+                        if let Some(cmd_win) = app.get_webview_window("command-input") {
+                            if cmd_win.is_visible().unwrap_or(false) {
+                                let _ = cmd_win.hide();
                             } else {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                                // Center the window horizontally under the cursor,
+                                // just below the menu bar.
+                                let w = 560.0_f64;
+                                let x = (position.x - w / 2.0).max(0.0).min(2560.0 - w);
+                                let y = position.y + 8.0;
+                                let _ = cmd_win.set_position(
+                                    tauri::PhysicalPosition::new(x as i32, y as i32),
+                                );
+                                let _ = cmd_win.show();
+                                let _ = cmd_win.set_focus();
                             }
                         }
                     }
                 })
                 .build(app)?;
 
-            // Show window on startup
+            // Show main window on startup
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
