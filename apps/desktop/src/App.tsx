@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { InspirationTab } from './InspirationTab';
 
 // ---------------------------------------------------------------------------
 // Tauri interop
@@ -37,7 +38,7 @@ type Thought = {
 type CoreMemoryBlock = { label: string; value: string; updatedAt: number; version: number };
 type RawObs = { id: string; event_type: string; timestamp: number; payload: Record<string, unknown>; };
 type ObserverInfo = { name: string; enabled: boolean; available: boolean; last_collection: number | null; events_collected: number; };
-type Tab = 'stream' | 'memory';
+type Tab = 'stream' | 'memory' | 'you';
 
 // ---------------------------------------------------------------------------
 // Category metadata — vivid, clearly differentiated
@@ -264,6 +265,7 @@ export function App() {
   const [obsCount, setObsCount] = useState(0);
   const [aiOk, setAiOk]         = useState<boolean | null>(null);
   const [showStatus, setShowStatus] = useState(false);
+  const [rawObs, setRawObs]         = useState<RawObs[]>([]);
   const thinkingRef = useRef(false);
 
   const merge = useCallback((incoming: Thought[]) => {
@@ -292,6 +294,7 @@ export function App() {
     try {
       const rawObs = await inv<RawObs[]>('get_recent_observations', { limit: 100 });
       setObsCount(rawObs?.length ?? 0);
+      setRawObs(rawObs ?? []);
       if (!rawObs?.length) return;
 
       const mem = await loadMemory(); setMemory(mem);
@@ -402,7 +405,7 @@ export function App() {
 
       {/* ── Tab bar ── */}
       <div style={{ display: 'flex', alignItems: 'center', margin: '12px 18px 0', borderBottom: '1px solid rgba(255,255,255,0.07)', flexShrink: 0 }}>
-        {(['stream', 'memory'] as Tab[]).map(t => (
+        {(['stream', 'memory', 'you'] as Tab[]).map(t => (
           <button key={t} type="button" onClick={() => setTab(t)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '6px 16px 9px', fontSize: 11, fontWeight: tab === t ? 600 : 400, color: tab === t ? '#f2f2f0' : '#585854', borderBottom: tab === t ? '2px solid #7c9fff' : '2px solid transparent', marginBottom: -1, transition: 'color 0.15s', letterSpacing: '0.05em' }}>
             {t}
           </button>
@@ -442,6 +445,9 @@ export function App() {
 
       {/* ── Memory ── */}
       {tab === 'memory' && <MemoryTab memory={memory} thoughts={thoughts} />}
+
+      {/* ── You (Inspiration) ── */}
+      {tab === 'you' && <InspirationTab obs={rawObs} memory={memory} />}
 
       {/* ── Footer ── */}
       <footer style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 18px 10px', flexShrink: 0, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
