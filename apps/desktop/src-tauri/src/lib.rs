@@ -1043,7 +1043,7 @@ pub fn run() {
             .decorations(false)
             .always_on_top(true)
             .visible(false)
-            .inner_size(560.0, 110.0)
+            .inner_size(700.0, 136.0)
             .resizable(false)
             .skip_taskbar(true)
             .build()?;
@@ -1070,18 +1070,33 @@ pub fn run() {
                             if cmd_win.is_visible().unwrap_or(false) {
                                 let _ = cmd_win.hide();
                             } else {
-                                // Center the window horizontally under the cursor,
-                                // just below the menu bar.
-                                let w = 560.0_f64;
-                                let x = (position.x - w / 2.0).max(0.0).min(2560.0 - w);
-                                let y = position.y + 8.0;
+                                // Position at bottom-center of the primary monitor.
+                                // Fall back to a common 1440×900 logical resolution.
+                                let (sw, sh, sf) = app.primary_monitor()
+                                    .ok().flatten()
+                                    .map(|m| (
+                                        m.size().width as f64,
+                                        m.size().height as f64,
+                                        m.scale_factor(),
+                                    ))
+                                    .unwrap_or((2880.0, 1800.0, 2.0));
+
+                                let win_w = 700.0_f64;
+                                let win_h = 136.0_f64;
+                                let sw_l = sw / sf; // logical screen width
+                                let sh_l = sh / sf; // logical screen height
+                                let x = ((sw_l / 2.0) - (win_w / 2.0)).max(0.0);
+                                let y = sh_l - win_h - 80.0; // 80px above taskbar/dock
+
                                 let _ = cmd_win.set_position(
-                                    tauri::PhysicalPosition::new(x as i32, y as i32),
+                                    tauri::LogicalPosition::new(x, y),
                                 );
                                 let _ = cmd_win.show();
                                 let _ = cmd_win.set_focus();
                             }
                         }
+                        // suppress unused-variable warning for `position`
+                        let _ = position;
                     }
                 })
                 .build(app)?;
