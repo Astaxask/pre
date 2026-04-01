@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{
     Manager,
+    WebviewWindowBuilder,
     tray::TrayIconBuilder,
 };
 use tokio::sync::mpsc;
@@ -686,6 +687,236 @@ async fn check_ai_status() -> Result<serde_json::Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Tray popover commands
+// ---------------------------------------------------------------------------
+
+/// Hide the tray-popover window. Called from JS when the popover loses focus.
+#[tauri::command]
+fn close_tray_popover(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("tray-popover") {
+        let _ = w.hide();
+    }
+    Ok(())
+}
+
+/// Show the main PRE window and hide the popover.
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(popover) = app.get_webview_window("tray-popover") {
+        let _ = popover.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    Ok(())
+}
+
+/// Returns up to 5 context-aware insights in priority order (fast, no LLM).
+/// The tray popover cycles through these with the "next" button.
+#[tauri::command]
+fn get_tray_insight() -> Result<Vec<serde_json::Value>, String> {
+    let observations = get_recent_observations(Some(80)).unwrap_or_default();
+    let now = chrono::Utc::now().timestamp_millis();
+    let hour = chrono::Local::now().hour();
+
+    // ── Aggregate activity ────────────────────────────────────────────────
+    let mut app_secs: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut kick_slugs: Vec<String> = vec![];
+    let mut twitch_slugs: Vec<String> = vec![];
+    let mut reddit_subs: Vec<String> = vec![];
+    let mut yt_channels: Vec<String> = vec![];
+    let mut gh_owners: Vec<String> = vec![];
+    let mut unique_sites: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut recent_switches: i64 = 0;
+    let mut chess_visits: i64 = 0;
+
+    let dev_apps = ["Cursor", "VS Code", "Code", "Terminal", "iTerm2", "Xcode", "WebStorm"];
+
+    for obs in &observations {
+        let event_type = obs.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+        let payload = obs.get("payload");
+        let ts = obs.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        match event_type {
+            "app-session" => {
+                let app_name = payload
+                    .and_then(|p| p.get("appName"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let secs = payload
+                    .and_then(|p| p.get("sessionDurationSeconds"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                if !app_name.is_empty()
+                    && !["WindowManager", "Finder", "loginwindow", "UserNotificationCenter", "Dock"]
+                        .contains(&app_name.as_str())
+                {
+                    *app_secs.entry(app_name).or_insert(0) += secs;
+                }
+                if now - ts < 600_000 {
+                    recent_switches += 1;
+                }
+            }
+            "browsing-session" => {
+                let domain = payload
+                    .and_then(|p| p.get("domainVisited"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let slug = payload
+                    .and_then(|p| p.get("pageSlug"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if !domain.is_empty() {
+                    unique_sites.insert(domain.to_string());
+                }
+                if domain.contains("chess.com") || domain.contains("lichess.org") {
+                    chess_visits += 1;
+                }
+                if !slug.is_empty() {
+                    if domain.contains("kick.com") && !kick_slugs.contains(&slug.to_string()) {
+                        kick_slugs.push(slug.to_string());
+                    } else if domain.contains("twitch.tv") && !twitch_slugs.contains(&slug.to_string()) {
+                        twitch_slugs.push(slug.to_string());
+                    } else if domain.contains("reddit.com") && !reddit_subs.contains(&slug.to_string()) {
+                        reddit_subs.push(slug.to_string());
+                    } else if domain.contains("youtube.com") && !yt_channels.contains(&slug.to_string()) {
+                        yt_channels.push(slug.to_string());
+                    } else if domain.contains("github.com") && !gh_owners.contains(&slug.to_string()) {
+                        gh_owners.push(slug.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let dev_secs: i64 = app_secs
+        .iter()
+        .filter(|(n, _)| dev_apps.iter().any(|d| n.contains(d)))
+        .map(|(_, s)| *s)
+        .sum();
+    let chrome_secs = app_secs.get("Google Chrome").copied().unwrap_or(0);
+    let claude_secs = app_secs.get("Claude").copied().unwrap_or(0);
+    let top_app = app_secs.iter().max_by_key(|(_, s)| **s).map(|(n, _)| n.clone());
+
+    let is_builder = dev_secs > 300;
+
+    // ── Build priority-ordered insight list ───────────────────────────────
+    let mut insights: Vec<(i32, &str, &str, String)> = vec![]; // (priority, category, icon, text)
+
+    // Highest priority: specific content they're consuming right now
+    if let Some(ref streamer) = kick_slugs.first() {
+        insights.push((100, "insight", "📺",
+            format!("You're watching {} on Kick. Study their consistency, not their content — they show up at the same time every week. That's the actual product. Do you have anything you show up for that reliably?", streamer)));
+    }
+    if let Some(ref streamer) = twitch_slugs.first() {
+        insights.push((99, "insight", "🎮",
+            format!("{} on Twitch has built an audience by doing the same thing in public, repeatedly. You're building something — what would happen if you did that too?", streamer)));
+    }
+    if let Some(ref sub) = reddit_subs.first() {
+        let sub_name = sub.trim_start_matches("r/");
+        insights.push((95, "idea", "💡",
+            format!("You're in r/{}. That community is pre-assembled people with a shared pain point — the hardest thing in distribution. What's the most-complained-about problem there that nobody has solved cleanly?", sub_name)));
+    }
+    if let Some(ref channel) = yt_channels.first() {
+        insights.push((90, "question", "📹",
+            format!("You follow {} on YouTube. What's the one concrete thing from their last video that you could act on today — not save, not bookmark — actually do?", channel)));
+    }
+    if let Some(ref owner) = gh_owners.first() {
+        insights.push((88, "question", "💻",
+            format!("You looked at {}'s GitHub. What made you click on their work? That pull — that signal of curiosity — is data about what you actually want to build.", owner)));
+    }
+
+    // Builder insights
+    if is_builder && dev_secs > 600 {
+        let mins = dev_secs / 60;
+        insights.push((85, "challenge", "⚒️",
+            format!("{}m of active building. The question isn't whether you can write it — it's whether you'll show it to someone real this week. Stealth is just fear with better branding.", mins)));
+    }
+
+    // Chess + builder combo
+    if chess_visits >= 2 && is_builder {
+        insights.push((82, "idea", "♟️",
+            "Chess player who codes: that's exactly who builds the tools a domain depends on. Lichess was built by one obsessed chess player. The niche already trusts you — you're already in it.".to_string()));
+    } else if chess_visits >= 2 {
+        insights.push((75, "insight", "♟️",
+            "Chess trains pattern recognition across long time horizons — the same skill that makes great engineers and strategists. You're not just playing a game.".to_string()));
+    }
+
+    // Context switches
+    if recent_switches > 12 {
+        insights.push((78, "question", "⚡",
+            format!("{} context switches in 10 minutes. That pattern almost always means there's one decision you're not making. What is it?", recent_switches)));
+    }
+
+    // Deep focus
+    if recent_switches <= 2 && dev_secs > 600 {
+        insights.push((70, "insight", "🎯",
+            "You've been in sustained focus for a while. That's genuinely rare and economically valuable right now. Most people can't buy it — you're doing it.".to_string()));
+    }
+
+    // Claude usage
+    if claude_secs > 300 {
+        let mins = claude_secs / 60;
+        insights.push((72, "question", "🧠",
+            format!("{}m with Claude. Are you using it reactively (one question, move on) or as a thinking partner that holds your full context? The difference in output quality is enormous.", mins)));
+    }
+
+    // Browse vs build imbalance
+    if chrome_secs > 1800 && dev_secs < 120 {
+        let mins = chrome_secs / 60;
+        insights.push((68, "blindspot", "🌐",
+            format!("{}m browsing, almost no building. The internet is read-only. You already know what you want to make — what's the smallest version you could ship by end of week?", mins)));
+    }
+
+    // Time of day insights
+    if hour >= 6 && hour < 10 {
+        insights.push((65, "insight", "🌅",
+            "You're in the highest cognitive bandwidth window of your day. Cortisol peaks around 8am. Most people waste it on email. You don't have to.".to_string()));
+    } else if hour >= 22 || hour < 4 {
+        insights.push((65, "challenge", "🌙",
+            "Late night work feels productive because there are no interruptions — but tired reasoning makes bad architectural decisions. What can you defer to tomorrow-morning-you?".to_string()));
+    }
+
+    // Many sites = research spiral
+    if unique_sites.len() >= 7 {
+        insights.push((60, "nudge", "📡",
+            format!("{} different sites today. Breadth without capture is forgetting at scale. Two sentences of notes would 10x your retention.", unique_sites.len())));
+    }
+
+    // Top app fallback
+    if insights.is_empty() {
+        if let Some(ref app_name) = top_app {
+            insights.push((50, "question", "🎯",
+                format!("{} has had your attention the most. Is that where your most important work happens — or is it where you go when you're avoiding your most important work?", app_name)));
+        } else {
+            insights.push((40, "insight", "✦",
+                "PRE is watching and building your picture. The longer it runs, the more specific the insights get.".to_string()));
+        }
+    }
+
+    // Sort by priority, return top 5
+    insights.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let result: Vec<serde_json::Value> = insights
+        .into_iter()
+        .take(5)
+        .map(|(_, category, icon, text)| {
+            serde_json::json!({
+                "text": text,
+                "category": category,
+                "icon": icon,
+            })
+        })
+        .collect();
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
 
@@ -709,8 +940,26 @@ pub fn run() {
             load_thoughts,
             save_core_memory,
             load_core_memory,
+            close_tray_popover,
+            open_main_window,
+            get_tray_insight,
         ])
         .setup(|app| {
+            // ── Tray-popover window (hidden until tray is clicked) ───────
+            let _popover_window = WebviewWindowBuilder::new(
+                app,
+                "tray-popover",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("")
+            .decorations(false)
+            .always_on_top(true)
+            .visible(false)
+            .inner_size(340.0, 190.0)
+            .resizable(false)
+            .skip_taskbar(true)
+            .build()?;
+
             // ── Tray icon ────────────────────────────────────────────
             let idle_image = tauri::image::Image::from_bytes(ICON_IDLE)
                 .expect("Failed to decode idle tray icon");
@@ -720,21 +969,48 @@ pub fn run() {
                 .icon_as_template(true)
                 .tooltip(tooltip_for_state(TrayState::Idle))
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                    // Only respond to left-click releases
+                    if let tauri::tray::TrayIconEvent::Click {
+                        position,
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event {
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
+                        if let Some(popover) = app.get_webview_window("tray-popover") {
+                            if popover.is_visible().unwrap_or(false) {
+                                // Already open — close it
+                                let _ = popover.hide();
                             } else {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                                // Position popover below the tray icon click point.
+                                // Offset so it's centered horizontally under the cursor
+                                // and sits just below the menu bar.
+                                let popover_w = 340.0_f64;
+                                let popover_h = 190.0_f64;
+                                let x = (position.x - popover_w / 2.0).max(4.0);
+                                let y = position.y + 6.0;
+
+                                // Clamp so it doesn't go off the right edge
+                                // (rough guard — 2560 covers most monitors)
+                                let x = x.min(2560.0 - popover_w);
+
+                                let _ = popover.set_size(tauri::PhysicalSize::new(
+                                    popover_w as u32,
+                                    popover_h as u32,
+                                ));
+                                let _ = popover.set_position(tauri::PhysicalPosition::new(
+                                    x as i32,
+                                    y as i32,
+                                ));
+                                let _ = popover.show();
+                                let _ = popover.set_focus();
                             }
                         }
                     }
                 })
                 .build(app)?;
 
-            // Show window on startup
+            // Show main window on startup
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
